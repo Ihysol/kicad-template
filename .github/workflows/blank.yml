@@ -1,0 +1,91 @@
+name: KiCad CI
+
+on:
+  push:
+    paths:
+      - 'Production/*.zip'
+  workflow_dispatch:
+
+env:
+  HARDWARE_DIR: ${{ github.workspace }}/Hardware
+  PCB_LAYERS: F.Cu,In1.Cu,In2.Cu,B.Cu,F.SilkS,B.SilkS,F.Mask,B.Mask,Edge.Cuts
+
+jobs:
+  drc:
+    name: Run DRC
+    runs-on: ubuntu-latest
+    container:
+      image: kicad/kicad:9.0
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Run DRC
+        run: |
+          echo "starting DRC for PCB-File..."
+          if ls "$HARDWARE_DIR"/*.kicad_pcb >/dev/null 2>&1; then
+            kicad-cli pcb drc --severity-error --exit-code-violations "$HARDWARE_DIR"/*.kicad_pcb
+          else
+            echo "no .kicad_pcb file found!"
+            exit 1
+          fi
+          echo "DRC completed."
+
+  export:
+    name: Export PDFs and Preview
+    runs-on: ubuntu-latest
+    container:
+      image: kicad/kicad:9.0
+    needs: drc
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: apt-get update && apt-get install -y poppler-utils
+
+      - name: Export PDFs and Render Preview
+        run: |
+          echo "PDF-export for pcb-layer..."
+          mkdir -p Docs/temp
+          if ls "$HARDWARE_DIR"/*.kicad_pcb >/dev/null 2>&1; then
+            PCB_FILE=$(ls "$HARDWARE_DIR"/*.kicad_pcb | head -n1)
+            PROJECT_NAME=$(basename "$PCB_FILE" .kicad_pcb)
+            for layer in $(echo "$PCB_LAYERS" | tr ',' ' '); do
+              kicad-cli pcb export pdf --output "Docs/temp/board_${layer//./_}.pdf" --layers "$layer" "$PCB_FILE"
+            done
+          else
+            echo "no PCB-file for PDF-export found!"
+            exit 1
+          fi
+
+          echo "Sorting and combining PCB-Layer-PDFs..."
+          pdfunite Docs/temp/*.pdf Docs/Project_board_layers.pdf
+
+          echo "Exporting schematic..."
+          mkdir -p Docs/temp_sch
+          if [ -f "${HARDWARE_DIR}/${PROJECT_NAME}.kicad_sch" ]; then
+            kicad-cli sch export pdf --output "Docs/Project_schematics.pdf" "${HARDWARE_DIR}/${PROJECT_NAME}.kicad_sch" || echo "export failed"
+          else
+            echo "no fitting .kicad_sch-file found!"
+          fi
+
+          rm -rf Docs/temp Docs/temp_sch
+
+          echo "Rendering PCB preview..."
+          kicad-cli pcb render --output "Docs/board_preview.png" --width 1920 --height 1080 --side top --background transparent --quality high "$PCB_FILE"
+          echo "Rendering process completed."
+
+      - name: Commit and push preview + PDFs
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "ci@example.com"
+          git add Docs/Project_board_layers.pdf Docs/Project_schematics.pdf Docs/img/board_preview.png || true
+          git commit -m "Update PCB preview image and PDFs" || true
+          git push
+        env:
+          # Required if pushing from GitHub Actions
+          GIT_AUTHOR_NAME: github-actions
+          GIT_COMMITTER_NAME: github-actions
+          GIT_AUTHOR_EMAIL: ci@example.com
+          GIT_COMMITTER_EMAIL: ci@example.com
