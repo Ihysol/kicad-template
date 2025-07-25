@@ -1,0 +1,50 @@
+image: kicad/kicad:9.0
+
+variables:
+  HARDWARE_DIR: "$CI_PROJECT_DIR/Hardware/"
+  PCB_LAYERS: "F.Cu,In1.Cu,In2.Cu,B.Cu,F.SilkS,B.SilkS,F.Mask,B.Mask,Edge.Cuts"
+
+stages:
+  - drc
+  - export
+
+drc:
+  stage: drc
+  script:
+    - echo "starting DRC for PCB-File..."
+    - if ls "$HARDWARE_DIR"/*.kicad_pcb >/dev/null 2>&1; then kicad-cli pcb drc --severity-error --exit-code-violations "$HARDWARE_DIR"/*.kicad_pcb; else echo "no .kicad_pcb file found!"; exit 1; fi
+    - echo "DRC completed."
+  rules:
+    - changes:
+        - Production/*.zip
+
+export:
+  stage: export
+  needs:
+    - drc
+  script:
+    - sudo apt-get update && sudo apt-get install -y poppler-utils
+    - echo "PDF-export for pcb-layer..."
+    - mkdir -p Docs/temp
+    - if ls "$HARDWARE_DIR"/*.kicad_pcb >/dev/null 2>&1; then PCB_FILE=$(ls "$HARDWARE_DIR"/*.kicad_pcb | head -n1); PROJECT_NAME=$(basename "$PCB_FILE" .kicad_pcb); for layer in $(echo "$PCB_LAYERS" | tr ',' ' '); do kicad-cli pcb export pdf --output "Docs/temp/board_${layer//\./_}.pdf" --layers "$layer" "$PCB_FILE"; done; else echo "no PCB-file for PDF-export found!"; exit 1; fi
+    - echo "sorting and combining PCB-Layer-PDFs..."
+    - pdfunite Docs/temp/board_F_Cu.pdf Docs/temp/board_In1_Cu.pdf Docs/temp/board_In2_Cu.pdf Docs/temp/board_B_Cu.pdf Docs/temp/board_F_SilkS.pdf Docs/temp/board_B_SilkS.pdf Docs/temp/board_F_Mask.pdf Docs/temp/board_B_Mask.pdf Docs/temp/board_Edge_Cuts.pdf "Docs/Project_board_layers.pdf"
+    - echo "PCB-Layer-Export completed."
+    - echo "exporting schematic..."
+    - mkdir -p Docs/temp_sch
+    - if ls "$HARDWARE_DIR"/*.kicad_pcb >/dev/null 2>&1; then sch_file="${HARDWARE_DIR}/${PROJECT_NAME}.kicad_sch"; if [ -f "$sch_file" ]; then kicad-cli sch export pdf --output "Docs/Project_schematics.pdf" "$sch_file" || echo "export of $sch_file failed!"; else echo "no fitting .kicad_sch-file found!"; fi; else echo "no .kicad_pcb-file found"; fi
+    - rm -rf Docs/temp Docs/temp_sch
+    - echo "schematic export completed."
+    - echo "starting rendering for pcb-preview..."
+    - if ls "$HARDWARE_DIR"/*.kicad_pcb >/dev/null 2>&1; then PCB_FILE=$(ls "$HARDWARE_DIR"/*.kicad_pcb | head -n1); kicad-cli pcb render --output "Docs/board_preview.png" --width 1920 --height 1080 --side top --background transparent --quality high "$PCB_FILE"; else echo "no .kicad_pcb-file found!"; exit 1; fi
+    - echo "rendering process completed."
+    - echo "Commit and push of updated preview image..."
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+    - git config --global user.name "GitLab CI"
+    - git config --global user.email "ci@mygit.th-deg.de"
+    - git add Docs/Project_board_layers.pdf Docs/Project_schematics.pdf Docs/board_preview.png || true
+    - git commit -m "Update PCB preview image and PDFs" || true
+    - git push "https://oauth2:${MYGIT_DOCKER_ACCESS_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" HEAD:${CI_COMMIT_REF_NAME}
+  rules:
+    - changes:
+      - Production/*.zip
