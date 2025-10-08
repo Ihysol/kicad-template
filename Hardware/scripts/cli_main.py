@@ -1,9 +1,40 @@
 import sys
 from pathlib import Path
-import argparse 
-import os 
-import io 
+import argparse
 import locale
+import io
+
+def process_cli_action(paths, action):
+    """
+    paths: list of Path objects
+    action: "process" or "purge"
+    Returns: (success: bool, output_str: str)
+    """
+    from library_manager import process_zip, purge_zip_contents
+    output_lines = []
+    success = True
+
+    try:
+        for p in paths:
+            if action == "process":
+                output_lines.append(f"PROCESS {p.name}")
+                try:
+                    process_zip(p)
+                    output_lines.append(f"[OK] {p.name} processed successfully.")
+                except Exception as e:
+                    output_lines.append(f"[ERROR] {p.name} failed: {e}")
+                    success = False
+            elif action == "purge":
+                output_lines.append(f"PURGE {p.name}")
+                try:
+                    purge_zip_contents(p)
+                    output_lines.append(f"[OK] {p.name} purged successfully.")
+                except Exception as e:
+                    output_lines.append(f"[ERROR] {p.name} failed: {e}")
+                    success = False
+        return success, "\n".join(output_lines)
+    except Exception as e:
+        return False, str(e)
 
 # =========================================================
 # UNICODE FIX: Ensure UTF-8 output on Windows for proper console display
@@ -11,101 +42,103 @@ import locale
 if sys.platform.startswith('win'):
     if locale.getpreferredencoding(False) not in ['UTF-8', 'utf8']:
         try:
-            # Re-wrap stdout/stderr buffers with UTF-8 encoding
             sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
             sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
         except Exception:
             pass
-# =========================================================
 
-# Import the core library management logic
+# =========================================================
+# Import your library management logic
+# =========================================================
 from library_manager import (
-    INPUT_ZIP_FOLDER, 
-    PROJECT_SYMBOL_LIB, 
-    list_symbols_simple, 
-    process_zip, 
+    INPUT_ZIP_FOLDER,
+    PROJECT_SYMBOL_LIB,
+    list_symbols_simple,
+    process_zip,
     purge_zip_contents
 )
 
-def parse_arguments():
-    """
-    Sets up and executes the argparse configuration for the CLI.
-    This defines the 'action' (positional) and 'zip_files' (positional/list) arguments.
-    """
+def parse_arguments(argv=None):
     parser = argparse.ArgumentParser(
-        description="KiCad Library Manager CLI: Tool for processing or purging symbols, footprints, and 3D files from ZIP archives into a project library.",
-        formatter_class=argparse.RawTextHelpFormatter 
-    ) 
+        description="KiCad Library Manager CLI",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
 
-    # Define the required positional argument for the operation mode
     parser.add_argument(
         'action',
         choices=['process', 'purge'],
-        help='The action to perform: "process" (import) or "purge" (delete).'
+        help='Action: "process" (import) or "purge" (delete).'
     )
-    
-    # Optional argument to override the default source directory
+
     parser.add_argument(
         '--input_folder',
         type=str,
-        help=f"Override the source folder containing ZIP files.\n(DEFAULT: '{INPUT_ZIP_FOLDER}')"
+        help=f"Override the source folder containing ZIP files (default: '{INPUT_ZIP_FOLDER}')"
     )
 
-    # Positional argument to accept one or more specific ZIP file paths
     parser.add_argument(
         'zip_files',
-        nargs='*', 
+        nargs='*',
         type=str,
         default=[],
-        help="One or more specific ZIP file paths to process or purge.\n"
-             "If provided, only these files are acted upon.\n"
-             "If omitted, ALL ZIP files in the --input_folder are used."
+        help="ZIP files to act upon. If empty, all zips in folder are used."
     )
-    
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main():
+def run_cli_action(action: str, zip_files=None, input_folder=None):
     """
-    Main execution function: parses arguments, determines target files, 
-    and dispatches the 'process' or 'purge' action for each file.
+    Core runner: can be called from GUI or CLI.
+    Returns (success: bool, output: str).
     """
-    args = parse_arguments()
-    
-    # Set the source folder, using the override if provided
+    from io import StringIO
+    import contextlib
+
+    if zip_files is None:
+        zip_files = []
+
+    argv = [action] + (zip_files or [])
+    if input_folder:
+        argv.insert(1, "--input_folder")
+        argv.insert(2, str(input_folder))
+
+    args = parse_arguments(argv)
+
     source_folder = Path(args.input_folder) if args.input_folder else INPUT_ZIP_FOLDER
+    zip_paths = [Path(f) for f in args.zip_files] if args.zip_files else list(source_folder.glob("*.zip"))
 
-    # Initialize the list of files to act upon
-    zip_paths = []
-    
-    if args.zip_files:
-        # If specific paths were provided (typically from the GUI), use them
-        zip_paths = [Path(f) for f in args.zip_files]
-    else:
-        # Otherwise, scan the source folder for all ZIP files
-        zip_paths = list(source_folder.glob("*.zip"))
-        
-    # Select the appropriate function and label based on the 'action' argument
     is_purge = args.action == 'purge'
     action_func = purge_zip_contents if is_purge else process_zip
     mode_name = "PURGE" if is_purge else "PROCESSING"
-    
-    if not zip_paths:
-        print(f"Warning: No ZIP files found in '{source_folder}' to process/purge.")
-        # Output the current state of the main symbol library
+
+    buffer = StringIO()
+    with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+        if not zip_paths:
+            print(f"Warning: No ZIP files found in '{source_folder}'.")
+            print("\n--- Final List of Main Symbols ---")
+            list_symbols_simple(PROJECT_SYMBOL_LIB, print_list=True)
+            return False, buffer.getvalue()
+
+        for zip_file in zip_paths:
+            print(f"\n--- {mode_name} {zip_file.name} ---")
+            action_func(zip_file)
+
         print("\n--- Final List of Main Symbols ---")
         list_symbols_simple(PROJECT_SYMBOL_LIB, print_list=True)
-        return
 
-    # --- Execute the Action on each selected ZIP file ---
-    for zip_file in zip_paths:
-        print(f"\n--- {mode_name} {zip_file.name} ---")
-        # Call the core library function (process_zip or purge_zip_contents)
-        action_func(zip_file) 
-        
-    # Concluding step: show the final state of the main symbol library
-    print("\n--- Final List of Main Symbols ---")
-    list_symbols_simple(PROJECT_SYMBOL_LIB, print_list=True)
+    return True, buffer.getvalue()
 
-if __name__ == "__main__": 
+
+def main():
+    args = parse_arguments()
+    success, output = run_cli_action(
+        action=args.action,
+        zip_files=args.zip_files,
+        input_folder=args.input_folder
+    )
+    print(output)
+    sys.exit(0 if success else 1)
+
+
+if __name__ == "__main__":
     main()

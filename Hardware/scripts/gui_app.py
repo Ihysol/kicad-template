@@ -66,40 +66,41 @@ HYPERLINK_THEME_TAG = "hyperlink_theme"
 
 def execute_library_action(paths, is_purge):
     """
-    Executes the library action (process/purge) via a separate CLI script 
-    to handle complex library operations outside the main GUI thread.
+    Executes library action.
+    - In .py mode: spawn subprocess to run CLI.
+    - In EXE mode: call CLI function directly.
     """
-    python_exe = sys.executable 
-    action = "process" if not is_purge else "purge"
-    cmd = [python_exe, str(CLI_SCRIPT_PATH), action]
-    # Append all selected ZIP file paths to the command
-    cmd.extend([str(p) for p in paths])
-        
+    success = False
+    output_lines = []
+
+    # Detect if running as EXE
+    running_as_exe = getattr(sys, 'frozen', False)
+
     try:
-        # Run the command and capture all output
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True, 
-            encoding='utf-8', 
-            errors='ignore' 
-        )
-        output = result.stdout + result.stderr
-
-        if result.returncode == 0:
-            return True, output
+        if running_as_exe:
+            # Directly call the function inside cli_main.py
+            # Import locally to avoid circular issues
+            import cli_main  # Your CLI script must expose `process_cli_action(paths, action)`
+            action_str = "purge" if is_purge else "process"
+            # CLI should return (success, output_str)
+            success, output_str = cli_main.process_cli_action(paths, action_str)
+            output_lines = output_str.splitlines()
         else:
-            # Format error output if the CLI script returns a non-zero code
-            error_output = f"--- CLI ERROR START ---\n"
-            error_output += f"CLI failed with exit code {result.returncode}\n"
-            error_output += output
-            error_output += f"--- CLI ERROR END ---"
-            return False, error_output
+            # Running as Python script: spawn subprocess
+            python_exe = sys.executable
+            action_str = "purge" if is_purge else "process"
+            cmd = [python_exe, str(CLI_SCRIPT_PATH), action_str]
+            cmd.extend([str(p) for p in paths])
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+            output_lines = (result.stdout + result.stderr).splitlines()
+            success = result.returncode == 0
 
-    except FileNotFoundError:
-        return False, "ERROR: Python interpreter or CLI script not found."
     except Exception as e:
-        return False, f"CRITICAL ERROR during CLI execution: {e}"
+        output_lines = [f"CRITICAL ERROR: {e}"]
+        success = False
+
+    # Join back for logging
+    return success, "\n".join(output_lines)
 
 
 def update_existing_symbols_cache():
@@ -651,7 +652,7 @@ def create_gui():
         with dpg.group(horizontal=True):
             dpg.add_text("CLI Output Log:")
             dpg.add_button(label="Clear Log", callback=clear_log, small=True) 
-            dpg.add_button(label="Copy Full Log", callback=show_full_log_popup, small=True)
+            dpg.add_button(label="Show Full Log", callback=show_full_log_popup, small=True)
             
         # Log Text Area (Display actual log entries)
         with dpg.child_window(tag=LOG_WINDOW_CHILD_TAG, width=-1, height=150, border=True):
@@ -706,3 +707,4 @@ if __name__ == "__main__":
         sys.exit(1)
         
     create_gui()
+
