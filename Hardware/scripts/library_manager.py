@@ -25,7 +25,6 @@ except TypeError:
 
 # Define project paths relative to the script's directory (assuming this is run from the project root)
 # Note: PROJECT_DIR is defined relative to where the script is run from.
-# In a fused app, this might need slight adjustment, but for now, it mirrors your original code.
 PROJECT_DIR = Path(os.path.abspath(".."))
 PROJECT_SYMBOL_LIB = PROJECT_DIR / "Lib-Symbols" / "ProjectSymbols.kicad_sym"
 PROJECT_FOOTPRINT_LIB = PROJECT_DIR / "Lib-Footprints" / "ProjectFootprints.pretty"
@@ -133,9 +132,6 @@ def localize_3d_model_path(mod_file: Path):
         print(f"Warning: Could not localize 3D model path in {mod_file.name}. Check model path format.")
     
     return modified_content
-
-
-# Part of library_manager.py
 
 def list_symbols_simple(sym_file: Path, print_list: bool = True):
     """
@@ -276,7 +272,6 @@ def process_zip(zip_path : Path):
     if TEMP_MAP_FILE.exists():
         TEMP_MAP_FILE.unlink()
     
-    # print(f"Extracting to: {tempdir}")
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
         zip_ref.extractall(tempdir)
         
