@@ -14,25 +14,55 @@ import json
 from sexpdata import loads, dumps, Symbol 
 # ---------------------------
 
+def find_upward(target: str, start_path: Path) -> Path | None:
+    """
+    Search upward from start_path to find either:
+    - a folder with the given name, OR
+    - a file matching the given glob pattern.
+
+    Returns the Path to the folder/file, or None if not found.
+    """
+    for parent in [start_path] + list(start_path.parents):
+        # Folder search (exact match)
+        candidate = parent / target
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+
+        # File search (wildcard pattern, e.g. "*.kicad_pro")
+        matches = list(parent.glob(target))
+        if matches:
+            return matches[0]
+
+    return None
+
 # --- Environment Setup (Load once for all functions) ---
 
 load_dotenv()
 
-# Attempt to get environment variables. These must be defined in the calling environment or .env.
-try:
-    # INPUT_ZIP_FOLDER is where incoming library ZIPs are temporarily processed.
-    INPUT_ZIP_FOLDER = Path(os.getenv("INPUT_ZIP_FOLDER"))
-except TypeError:
-    # Handle case where .env is missing or variables aren't set
-    raise ValueError("Missing GLOBAL_SYMBOL_LIB, GLOBAL_FOOTPRINT_LIB, or INPUT_ZIP_FOLDER in .env")
+# get path of executable / script
+base_path = Path(sys.executable if getattr(sys, 'frozen', False) else __file__).resolve().parent
 
-# Define project paths relative to the script's directory (assuming this is run from the project root)
-PROJECT_DIR = Path(os.path.abspath(".."))
+# find kicad project files
+project_file = find_upward("*.kicad_pro", base_path)
+if not project_file:
+    raise RuntimeError("No KiCad project (*.kicad_pro) found.")
+PROJECT_DIR = project_file.parent
 PROJECT_SYMBOL_LIB = PROJECT_DIR / "Lib-Symbols" / "ProjectSymbols.kicad_sym"
 PROJECT_FOOTPRINT_LIB = PROJECT_DIR / "Lib-Footprints" / "ProjectFootprints.pretty"
 PROJECT_3D_DIR = PROJECT_DIR / "Lib-3D-Files" 
-# This is used for footprint path localization (e.g., ProjectFootprints:FP_Name)
-PROJECT_FOOTPRINT_LIB_NAME = PROJECT_FOOTPRINT_LIB.stem 
+PROJECT_FOOTPRINT_LIB_NAME = PROJECT_FOOTPRINT_LIB.stem  # used for footprint path localization (e.g., ProjectFootprints:FP_Name)
+
+# find script input folder
+input_folder_name = os.getenv("INPUT_ZIP_FOLDER", "library_input")
+INPUT_ZIP_FOLDER = find_upward(input_folder_name, base_path)
+if INPUT_ZIP_FOLDER is None:
+    raise RuntimeError(f"Input folder \"{input_folder_name}\" not found in current or parent directories.")
+
+# Create directories if not already there
+os.makedirs(PROJECT_SYMBOL_LIB.parent, exist_ok=True)
+os.makedirs(PROJECT_FOOTPRINT_LIB, exist_ok=True)
+os.makedirs(PROJECT_3D_DIR, exist_ok=True)
+os.makedirs(INPUT_ZIP_FOLDER, exist_ok=True)
 
 # --- Global Regex Definitions (Minimizing use) ---
 
@@ -42,12 +72,6 @@ SUB_PART_PATTERN = re.compile(r'_\d(_\d)+$|_\d$')
 # Temporary file to map footprint names (from .kicad_mod) to their main symbol name (for 3D model path linking)
 TEMP_MAP_FILE = INPUT_ZIP_FOLDER / "footprint_to_symbol_map.json" 
 
-# --- Ensure Project Directories Exist ---
-
-os.makedirs(PROJECT_SYMBOL_LIB.parent, exist_ok=True)
-os.makedirs(PROJECT_FOOTPRINT_LIB, exist_ok=True)
-os.makedirs(PROJECT_3D_DIR, exist_ok=True)
-os.makedirs(INPUT_ZIP_FOLDER, exist_ok=True)
 
 # --------------------------------------------------------------------------------------------------
 #                                 CORE FUNCTION LOGIC

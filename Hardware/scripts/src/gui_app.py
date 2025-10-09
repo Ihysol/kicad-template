@@ -11,21 +11,12 @@ import tempfile
 import re 
 import webbrowser 
 
-# Import the necessary Font Awesome icon constant
-try:
-    from fa_icons import ICON_FOLDER_OPEN
-except ImportError:
-    # Define fallback icon for when the custom file is missing
-    ICON_FOLDER_OPEN = "" 
-    print("Warning: fa_icons.py not found. Using emoji fallback for the icon.")
-
 # Import Tkinter for the native file dialog
 import tkinter as tk
 from tkinter import filedialog as fd
 
-# --- Global Data Cache & Library Imports ---
-# Path to the custom Font Awesome font for icons
-FONT_PATH = "Font Awesome 6 Free-Solid-900.otf" 
+FONT_PATH = "fonts/NotoSans-Regular.ttf" 
+FONT_SIZE = 18
 
 # Cache of main symbols already in the project library
 PROJECT_EXISTING_SYMBOLS = set() 
@@ -46,7 +37,7 @@ except ImportError as e:
 
 # --- Constants for DPG Tags ---
 WINDOW_WIDTH = 900
-WINDOW_HEIGHT = 615 
+WINDOW_HEIGHT = 650 
 CURRENT_PATH_TAG = "current_path_text" 
 FILE_COUNT_TAG = "file_count_text" 
 FILE_CHECKBOXES_CONTAINER = "file_checkboxes_container" 
@@ -56,9 +47,25 @@ LOG_TEXT_TAG = "log_text_container"
 LOG_WINDOW_CHILD_TAG = "log_window_child" 
 FULL_LOG_POPUP_TAG = "full_log_popup"
 FULL_LOG_TEXT_TAG = "full_log_text_area"
-ICON_FONT_TAG = "icon_font_tag"
 HYPERLINK_THEME_TAG = "hyperlink_theme" 
 # -------------------------
+
+
+def load_global_font(font_path: str, size: int = 16, tag: str = "global_font_tag"):
+    """Loads a font and applies it globally to the GUI."""
+    if not os.path.exists(font_path):
+        print(f"Font file not found: {font_path}")
+        return None
+
+    try:
+        with dpg.font_registry():
+            font = dpg.add_font(font_path, size, tag=tag)
+            dpg.bind_font(font)
+            return font
+    except Exception as e:
+        print(f"Error loading font '{font_path}': {e}")
+        return None
+
 
 # ===================================================
 # --- CORE LOGIC & EXECUTION ---
@@ -524,28 +531,17 @@ def create_gui():
     """Sets up the DearPyGui context, themes, and main window layout."""
     dpg.create_context()
     
+    
+    load_global_font(FONT_PATH, size=FONT_SIZE)
+
+    
     dpg.create_viewport(
         title='KiCad Library Manager', 
         width=WINDOW_WIDTH, 
         height=WINDOW_HEIGHT,
-        resizable=False 
+        resizable=True 
     )
     dpg.setup_dearpygui()
-
-    # --- Font Setup for Icons ---
-    icon_font = None
-    if os.path.exists(FONT_PATH):
-        try:
-            # Load Font Awesome to display icons like the folder icon
-            with dpg.font_registry():
-                icon_font = dpg.add_font(FONT_PATH, 16, tag=ICON_FONT_TAG)
-                dpg.add_font_range(0xFA00, 0xFFFF, parent=icon_font)
-        except Exception as e:
-            print(f"Error loading icon font: {e}. Icon will use fallback.")
-            icon_font = None
-    else:
-        print(f"Warning: Icon font file not found at {FONT_PATH}. Icon will use fallback.")
-    # -----------------------------
 
     # --- Theme setup ---
     with dpg.theme() as global_theme:
@@ -589,11 +585,9 @@ def create_gui():
             
             # Button to open the current path in the OS file explorer
             explorer_button = dpg.add_button(
-                label=f"Open in Explorer {ICON_FOLDER_OPEN}", 
+                label=f"Open in Explorer", 
                 callback=open_folder_in_explorer
             )
-            if icon_font:
-                dpg.bind_item_font(explorer_button, icon_font)
 
         dpg.add_text(
             "Current Folder: (Initializing...)", 
