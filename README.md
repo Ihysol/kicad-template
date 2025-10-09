@@ -4,98 +4,73 @@
 
 ![](Docs/board_preview.png)
 
-This is a ready-to-use template for a clean KiCad repository, designed for embedded hardware projects.
+This template provides a clean KiCad repository structure for embedded hardware projects, including a GUI-based import script (`cse_manager`) for component management.
 
 ---
 
 ## Features
 
-* Clean structure for embedded hardware development.
-* GUI-based import script (`cse_manager`) for adding parts from [componentsearchengine.com](https://componentsearchengine.com/).
+Clean structure for hardware development with automated component import and library management.
 
-**DISCLAIMER:** KiCad’s file structure makes simultaneous editing by multiple people difficult. Limit active work on the project files to one person at a time. Other work, such as research or tests, should be done in parallel, switching as tasks are completed.
+**DISCLAIMER:** KiCad files are difficult to edit simultaneously. Limit active work on project files to one person at a time; other tasks like research or tests can be done in parallel.
 
 ---
 
-## How to Use
+## Getting Started
 
-### 1. Clone this repository
+1. **Clone the repository:**
 
 ```bash
 git clone https://github.com/Ihysol/kicad-template.git
 ```
 
-### 2. Set up your KiCad project
+2. **Set up your KiCad project:**
 
-1. Add symbols, footprints, and 3D models for parts in the respective `Lib-*` folders.
-2. Check if footprints are available online (via [componentsearchengine.com](https://componentsearchengine.com/) or distributor websites like Mouser, Digi-Key, etc.).
-3. Add the parts:
+* Add symbols, footprints, and 3D models in `Lib-*` folders
+* Check for existing footprints online (ComponentSearchEngine, Mouser, Digi-Key)
+* Add parts either using the `cse_manager` GUI or manually
+* By default, `cse_manager` uses the `library_input` folder located in the `cse_manager` folder to read component files
+* Keep all other libraries local; do not use global libraries
 
-   * **Automatic**: Use the `cse_manager` script included in this repository to add parts automatically.
-   * **Manual**: Add files manually and link them properly in KiCad.
-4. All other included libraries **must** be local and uploaded with this repository (do **not** use global libraries).
-
-### 3. Update this README
-
-* Describe your project and its purpose.
+3. **Update this README** to describe your project
 
 ---
 
-## About Ordering Your PCB
+## Ordering Your PCB
 
-### Use Tags
-
-* Create Git tags for PCBs sent to production.
-* This provides a snapshot of the PCB at the time of ordering.
-
-### Generate a Mouser Cart
-
-* Use the [KiCAD BOM Mouser Order Script](https://github.com/Ihysol/KiCAD_BOM_Mouser_Order_Script) to generate a cart from your BOM automatically.
+* Use Git tags for PCBs sent to production to snapshot the PCB at that moment
+* Use the [KiCAD BOM Mouser Order Script](https://github.com/Ihysol/KiCAD_BOM_Mouser_Order_Script) to generate a BOM cart automatically
 
 ---
 
 ## Folder Structure
 
-All folders in this template are intended to be used:
-
-* **Hardware/** – contains all KiCad-related files, including symbols, footprints, and 3D models.
-
-  * Add custom footprints here if needed.
-* **Production/** – for generated Gerber files ready for PCB ordering. Only include finalized outputs here.
-* **Docs/** – notes, documentation, and changelogs.
-
-  * Include relevant information about development, issues, and design decisions.
-  * Datasheets should be linked externally when possible (to minimize repository size).
-  * After pushing Gerber files, schematics, and board layers can be added to the Docs folder.
+* **Hardware/**: KiCad files, symbols, footprints, and 3D models. Add custom footprints here
+* **Production/**: Final Gerber files for PCB ordering
+* **Docs/**: Documentation, notes, and changelogs. Link datasheets externally and update after production
 
 ---
 
-## Version Control with KiCad
+## Version Control
 
-* Use the **main branch** for your current hardware version.
-* When a PCB is ordered:
-
-  1. **Create a tag** for the commit corresponding to the ordered version (e.g., `v1.0`).
-  2. Update the `Docs/` folder with changelogs and relevant notes.
-* Each repository/project should contain **only one hardware design**.
-
-  * For multiple PCBs with different purposes, create separate repositories using this template.
+* Use the main branch for the current hardware version
+* Tag commits corresponding to production-ready PCBs (e.g., `v1.0`)
+* Keep each repository dedicated to a single hardware design
+* Use separate repositories for multiple PCB projects
 
 ---
 
 ## Scripts & Tools
 
-### cse_manager
-
-* Location: `Hardware/cse_manager/`
-* Provides a GUI to import and organize parts from componentsearchengine.com.
-* Can be run as a Python script or, if built with PyInstaller, as a standalone executable.
+* The `cse_manager` GUI is located in `Hardware/cse_manager/`
+* Imports and organizes components automatically
+* Can be run as a Python script or standalone executable
+* By default, it uses the `library_input` folder inside the `cse_manager` folder to read component files
 
 ---
 
 ## Best Practices
 
-* Always include local libraries in the repository; avoid using global KiCad libraries.
-* Use tags to reference production-ready hardware versions.
-* Keep generated files separate (e.g., in `Production/` or temporary folders) and ignore them in Git.
-* Limit simultaneous editing on KiCad files to one person at a time.
+* Always include local libraries in the repository; avoid using global KiCad libraries
+* Use tags to reference production-ready hardware versions
+* Limit simultaneous editing on KiCad files to **one person** at a time
