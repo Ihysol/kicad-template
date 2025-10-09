@@ -16,7 +16,7 @@ drc:
     - echo "DRC completed."
   rules:
     - changes:
-        - Production/*.zip
+        - Hardware/Production/*.zip
 
 export:
   stage: export
@@ -47,4 +47,4 @@ export:
     - git push "https://oauth2:${MYGIT_DOCKER_ACCESS_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" HEAD:${CI_COMMIT_REF_NAME}
   rules:
     - changes:
-      - Production/*.zip
+      - Hardware/Production/*.zip
