@@ -1,44 +1,101 @@
-# KiCAD Project Template <- Change to your project name!
-<!-- Keep this line! Rendered picture of PCB is going to be displayed after Production files are pushed to branch! -->
-<!--  -->
-<!--  -->
+# KiCAD Project Template
+
+<!-- Keep this line! Rendered picture of PCB will be displayed after production files are pushed to branch -->
+
 ![](Docs/board_preview.png)
-<!--  -->
-<!--  -->
-<!--  -->
 
-This is a template for a clean kicad repository. Use it to create your future projects!
+This is a ready-to-use template for a clean KiCad repository, designed for embedded hardware projects.
 
-**DISCLAMER**: *KiCADs file structure makes it hard for multiple people to work on the project on the same time. So limit the active work on the project files to one person at a given time and split other work like research or tests to other members and switch if given tasks are finished.* 
+---
 
-## HOW TO USE <------ START HERE!
-1. Clone this repository
-2. Setup your KiCAD project
-    - Add symbols, footprints and 3d-models for parts in the respective Lib-* folders.
-    - Check if there are already available footprints for your parts online (https://componentsearchengine.com/ or on distributor websites like mouser ect.)
-    - I would recommend using the library loader program (https://www.samacsys.com/library-loader/), add the symbol and footprint folders of the library loader to the global libraries of your kicad (only need to do it once).
-    - Add the libraries to the ProjectSymbols or ProjectFootprints libraries already existing in this Template. Other added Libraries ect. must be used as local libraries (NOT global ones).
-3. Change this README.md to what your project is about (look at exampleREADME.md)
+## Features
 
-HINTS: 
-- Please create TAGS for pcbs that were ordered. This way there is a snapshot in time what the pcb file looked like at the time of ordering.
-- To make your life easier, refer to this repository for automatic generation of carts on mouser: https://github.com/Ihysol/KiCAD_BOM_Mouser_Order_Script
-- Violations that make the project or repository unrepresentable might revoke your rights to work on this repository until the issues are resolved.
+* Clean structure for embedded hardware development.
+* GUI-based import script (`cse_manager`) for adding parts from [componentsearchengine.com](https://componentsearchengine.com/).
 
-## Folder structure
-The folders in this template are __all__ to be used! 
+**DISCLAIMER:** KiCad’s file structure makes simultaneous editing by multiple people difficult. Limit active work on the project files to one person at a time. Other work, such as research or tests, should be done in parallel, switching as tasks are completed.
 
-The **Hardware** folder will contain all KiCAD related files, including the symbols, footprints and 3dfiles if there are any. If graphic items are realized through custom footprints, add them in the footprints folder.
+---
 
-**Docs** are for notes, documentation and changelogs on the projects function. Any noteworthy informations and even problems during the development should be written down there. Datasheets are to be linked externally if possible (url) and not placed in there to minimize the size of the repository. After pushing gerber files, schematics and board layers are pushed into Docs folder.
+## How to Use
 
-The **Production** folder is for the eventually generated gerberfiles to be ordered as finalized pcbs. Nothing else.
+### 1. Clone this repository
 
-## Use git for version control
-**INFO**: Read the disclaimer on top.
+```bash
+git clone https://github.com/Ihysol/kicad-template.git
+```
 
-Use the main branch for your **current** hardware version. 
+### 2. Set up your KiCad project
 
-If an pcb was ordered, **create a TAG of the commit that was ordered** and name it appropriately (e.g. v1.0). This will keep this version and prevent alteration of the documentation. TAGs will be used as reference for the hardware at the current time (if other people need to work on it). Also update the Docs folder by adding changelogs.
+1. Add symbols, footprints, and 3D models for parts in the respective `Lib-*` folders.
+2. Check if footprints are available online (via [componentsearchengine.com](https://componentsearchengine.com/) or distributor websites like Mouser, Digi-Key, etc.).
+3. Add the parts:
 
-One repository/project should only be for **ONE** hardware. Split multiple pcbs with different purposes into their own repository and apply all above rules by using this template again.
+   * **Automatic**: Use the `cse_manager` script included in this repository to add parts automatically.
+   * **Manual**: Add files manually and link them properly in KiCad.
+4. All other included libraries **must** be local and uploaded with this repository (do **not** use global libraries).
+
+### 3. Update this README
+
+* Describe your project and its purpose.
+
+---
+
+## About Ordering Your PCB
+
+### Use Tags
+
+* Create Git tags for PCBs sent to production.
+* This provides a snapshot of the PCB at the time of ordering.
+
+### Generate a Mouser Cart
+
+* Use the [KiCAD BOM Mouser Order Script](https://github.com/Ihysol/KiCAD_BOM_Mouser_Order_Script) to generate a cart from your BOM automatically.
+
+---
+
+## Folder Structure
+
+All folders in this template are intended to be used:
+
+* **Hardware/** – contains all KiCad-related files, including symbols, footprints, and 3D models.
+
+  * Add custom footprints here if needed.
+* **Production/** – for generated Gerber files ready for PCB ordering. Only include finalized outputs here.
+* **Docs/** – notes, documentation, and changelogs.
+
+  * Include relevant information about development, issues, and design decisions.
+  * Datasheets should be linked externally when possible (to minimize repository size).
+  * After pushing Gerber files, schematics, and board layers can be added to the Docs folder.
+
+---
+
+## Version Control with KiCad
+
+* Use the **main branch** for your current hardware version.
+* When a PCB is ordered:
+
+  1. **Create a tag** for the commit corresponding to the ordered version (e.g., `v1.0`).
+  2. Update the `Docs/` folder with changelogs and relevant notes.
+* Each repository/project should contain **only one hardware design**.
+
+  * For multiple PCBs with different purposes, create separate repositories using this template.
+
+---
+
+## Scripts & Tools
+
+### cse_manager
+
+* Location: `Hardware/cse_manager/`
+* Provides a GUI to import and organize parts from componentsearchengine.com.
+* Can be run as a Python script or, if built with PyInstaller, as a standalone executable.
+
+---
+
+## Best Practices
+
+* Always include local libraries in the repository; avoid using global KiCad libraries.
+* Use tags to reference production-ready hardware versions.
+* Keep generated files separate (e.g., in `Production/` or temporary folders) and ignore them in Git.
+* Limit simultaneous editing on KiCad files to one person at a time.
