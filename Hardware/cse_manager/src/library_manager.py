@@ -74,7 +74,7 @@ TEMP_MAP_FILE = INPUT_ZIP_FOLDER / "footprint_to_symbol_map.json"
 
 
 # --------------------------------------------------------------------------------------------------
-#                                 CORE FUNCTION LOGIC
+#                 CORE FUNCTION LOGIC
 # --------------------------------------------------------------------------------------------------
 
 # --- Helper function for finding elements in S-expression list structures ---
@@ -200,6 +200,79 @@ def localize_3d_model_path(mod_file: Path, footprint_map: dict):
     
     # Return None if no 'model' tag was found
     return None 
+
+
+def rename_extracted_assets(tempdir: Path, footprint_map: dict):
+    """
+    Renames the extracted .kicad_mod and .stp files in the temporary directory 
+    based on the main symbol name from the footprint_map.
+    
+    NOTE: The footprint_map contains: {original_footprint_name: main_symbol_name}
+    It is MODIFIED IN-PLACE to track renamed footprints {symbol_name: symbol_name}.
+    """
+    renamed_count = 0
+    
+    # 1. --- Rename Footprints (.kicad_mod) ---
+    footprint_files_to_rename = list(tempdir.rglob("*.kicad_mod"))
+
+    for mod_file in footprint_files_to_rename:
+        footprint_name = mod_file.stem
+        # Look up the main symbol name using the current footprint name
+        symbol_name = footprint_map.get(footprint_name)
+        
+        if symbol_name and symbol_name != footprint_name:
+            new_name = symbol_name + mod_file.suffix
+            new_path = mod_file.parent / new_name
+            if not new_path.exists():
+                mod_file.rename(new_path)
+                renamed_count += 1
+                print(f"Renamed Footprint: {mod_file.name} -> {new_name}")
+                
+                # CRITICAL: Update the footprint_map: 
+                # Remove the old entry, and add the new one (mapping symbol_name to itself)
+                del footprint_map[footprint_name]        
+                footprint_map[symbol_name] = symbol_name 
+                
+    
+    # 2. --- Rename 3D Models (.stp) ---
+    # Create a reverse map based on the *updated* footprint_map.
+    # We use this to check if a 3D model name matches a final Symbol Name.
+    # Note: footprint_map now contains: {original_fp_name: symbol_name} AND {symbol_name: symbol_name}
+
+    for stp_file in tempdir.rglob("*.stp"):
+        model_name_stem = stp_file.stem
+        target_symbol_name = None
+        
+        # A. Check if the model name matches a key in the (pre-rename) map 
+        #    (i.e., the original footprint name)
+        if model_name_stem in footprint_map:
+            # If the model name is an original footprint name, get the symbol name
+            target_symbol_name = footprint_map[model_name_stem]
+        
+        # B. Check if the model name already matches a symbol name (post-rename name)
+        #    This covers cases where the 3D model was already named correctly 
+        #    OR where the footprint was renamed and the 3D model matches the new footprint name.
+        elif model_name_stem in footprint_map.values():
+            target_symbol_name = model_name_stem # It is already the symbol name
+        
+        
+        if target_symbol_name and target_symbol_name != model_name_stem:
+            new_name = target_symbol_name + stp_file.suffix
+            new_path = stp_file.parent / new_name
+            
+            # Avoid renaming if a file with the target name already exists (e.g., if two FPs share the same 3D model)
+            if not new_path.exists():
+                stp_file.rename(new_path)
+                renamed_count += 1
+                print(f"Renamed 3D Model: {stp_file.name} -> {new_name}")
+
+    if renamed_count > 0:
+        # Re-save the map after renaming to ensure subsequent steps use the new name
+        with open(TEMP_MAP_FILE, 'w') as f:
+            json.dump(footprint_map, f, indent=4)
+        print(f"INFO: Saved updated footprint_map with {len(footprint_map)} entries.")
+
+    return renamed_count
 
 def append_symbols_from_file(src_sym_file: Path):
     """
@@ -332,10 +405,10 @@ def append_symbols_from_file(src_sym_file: Path):
     return appended_any
 
 
-def process_zip(zip_path : Path):
+def process_zip(zip_file, rename_assets=False): # <--- Corrected argument name: zip_file
     """Processes a single ZIP file: extracts, adds symbols (localizing footprint links and building a map), 
     localizes 3D model paths in footprints, and copies footprints and 3D models to project folders."""
-    
+
     tempdir = INPUT_ZIP_FOLDER / "temp_extracted"
     # Ensure a clean temporary directory
     if tempdir.exists():
@@ -348,10 +421,10 @@ def process_zip(zip_path : Path):
         
     try:
         # Extract all contents of the ZIP file
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        with zipfile.ZipFile(zip_file, 'r') as zip_ref: # <--- Use zip_file
             zip_ref.extractall(tempdir)
     except Exception as e:
-        print(f"ERROR extracting ZIP file {zip_path.name}: {e}")
+        print(f"ERROR extracting ZIP file {zip_file.name}: {e}") # <--- Use zip_file
         shutil.rmtree(tempdir)
         return
 
@@ -374,7 +447,18 @@ def process_zip(zip_path : Path):
         with open(TEMP_MAP_FILE, 'r') as f:
             footprint_map = json.load(f)
 
-
+    # --- 1b. RENAME ASSETS (INCLUDED LOGIC) ---
+    if rename_assets:
+        print("INFO: Renaming of Footprints/3D Models is ENABLED.")
+        rename_count = rename_extracted_assets(tempdir, footprint_map)
+        if rename_count > 0:
+            # Reload the map after renaming to ensure subsequent steps use the updated keys
+            if TEMP_MAP_FILE.exists():
+                with open(TEMP_MAP_FILE, 'r') as f:
+                    footprint_map = json.load(f)
+        print(f"INFO: Renamed {rename_count} asset file(s).")
+    # -------------------------------------------
+    
     # --- 2. Process Footprints (Localize 3D Path and Copy) ---
     for mod_file in tempdir.rglob("*.kicad_mod"):
         dest = PROJECT_FOOTPRINT_LIB / mod_file.name
@@ -398,7 +482,7 @@ def process_zip(zip_path : Path):
     # --- 3. Process 3D Models (Copy the Symbol-Named STP files) ---
     copied_3d_count = 0
     for stp_file in tempdir.rglob("*.stp"):
-        # Copy to the 3D directory using its original name (which should match the symbol name)
+        # Copy to the 3D directory using its current (potentially renamed) name
         dest_file = PROJECT_3D_DIR / stp_file.name
         
         if dest_file.exists():
