@@ -1,11 +1,8 @@
-# library_manager.py - Emojis Removed
-
 import os
 import shutil
 import sys 
 import re
 from dotenv import load_dotenv
-import tempfile
 import zipfile
 from pathlib import Path
 import json
@@ -19,7 +16,6 @@ def find_upward(target: str, start_path: Path) -> Path | None:
     Search upward from start_path to find either:
     - a folder with the given name, OR
     - a file matching the given glob pattern.
-
     Returns the Path to the folder/file, or None if not found.
     """
     for parent in [start_path] + list(start_path.parents):
@@ -64,7 +60,7 @@ os.makedirs(PROJECT_FOOTPRINT_LIB, exist_ok=True)
 os.makedirs(PROJECT_3D_DIR, exist_ok=True)
 os.makedirs(INPUT_ZIP_FOLDER, exist_ok=True)
 
-# --- Global Regex Definitions (Minimizing use) ---
+# --- Global Regex Definitions ---
 
 # Regex to identify and remove symbol sub-part/alternate unit suffixes (e.g., _A, _B_C, _1_1)
 SUB_PART_PATTERN = re.compile(r'_\d(_\d)+$|_\d$') 
@@ -74,32 +70,24 @@ TEMP_MAP_FILE = INPUT_ZIP_FOLDER / "footprint_to_symbol_map.json"
 
 
 # --------------------------------------------------------------------------------------------------
-#                 CORE FUNCTION LOGIC
+#                 CORE FUNCTION LOGIC
 # --------------------------------------------------------------------------------------------------
 
-# --- Helper function for finding elements in S-expression list structures ---
+# --- Helper functions for S-expression parsing ---
+
 def find_sexp_element(sexp_list, target_tag):
-    """
-    Searches a flat list of S-expression elements for a list that starts with the target tag.
-    Returns the element (list) or None.
-    """
+    """Searches a list of S-expression elements for a list that starts with the target tag."""
     target_sym = Symbol(target_tag)
     for element in sexp_list:
-        # Check if the element is a list starting with the target tag string or Symbol
         if isinstance(element, list) and len(element) > 0 and (element[0] == target_tag or element[0] == target_sym):
             return element
     return None
 
 def find_sexp_property(sexp_list, prop_name):
-    """
-    Searches a list of S-expression elements for a KiCad 'property' list with the given name.
-    Returns the element (list) or None.
-    """
+    """Searches a list of S-expression elements for a KiCad 'property' list with the given name."""
     prop_sym = Symbol('property')
     for element in sexp_list:
-        # Check for the structure: ['property', 'Name', 'Value', ...]
         if isinstance(element, list) and len(element) > 2 and (element[0] == 'property' or element[0] == prop_sym):
-            # Check if the property name (index 1) matches
             if str(element[1]) == prop_name:
                 return element
     return None
@@ -117,8 +105,6 @@ def list_symbols_simple(sym_file: Path, print_list: bool = True):
     try:
         with open(sym_file, "r", encoding="utf-8") as f:
             content = f.read()
-        
-        # Load S-expression. The top level is (kicad_symbol_lib (symbol ...))
         sexp_list = loads(content) 
     except Exception as e:
         if print_list:
@@ -127,14 +113,9 @@ def list_symbols_simple(sym_file: Path, print_list: bool = True):
 
     symbols = []
     
-    # Iterate over the elements in the main list, skipping the top-level tag (kicad_symbol_lib)
     for element in sexp_list[1:]: 
-        # Identify elements that are a KiCad symbol block: (symbol "Name" ...)
         if isinstance(element, list) and len(element) > 1 and (element[0] == 'symbol' or element[0] == Symbol('symbol')):
-            # The symbol name is the second element in the list
             symbol_name = str(element[1]) 
-            
-            # Filter out sub-parts or alternate units to only list the main symbol
             if not SUB_PART_PATTERN.search(symbol_name):
                 symbols.append(symbol_name)
 
@@ -149,21 +130,19 @@ def list_symbols_simple(sym_file: Path, print_list: bool = True):
 
 
 def get_existing_main_symbols():
-    """
-    Wrapper to get the set of main symbols currently in the project library for quick lookup.
-    """
+    """Wrapper to get the set of main symbols currently in the project library for quick lookup."""
     return set(list_symbols_simple(PROJECT_SYMBOL_LIB, print_list=False))
 
 
 def localize_3d_model_path(mod_file: Path, footprint_map: dict):
     """
     Reads a .kicad_mod (footprint) file, uses the footprint_map to find the associated main symbol name, 
-    and replaces the 3D model path to use the ${KIPRJMOD} variable.
+    and replaces the 3D model path to use the ${KIPRJMOD} variable and the symbol name.
     Returns the modified content string or None on error or if no model tag is found.
     """
     
     footprint_name = mod_file.stem
-    # The symbol name is used to generate the localized 3D model filename (SymbolName.stp)
+    # Use the footprint name (which might be the symbol name if renaming occurred) to get the symbol name
     symbol_name = footprint_map.get(footprint_name)
 
     if not symbol_name:
@@ -172,21 +151,18 @@ def localize_3d_model_path(mod_file: Path, footprint_map: dict):
     try:
         with open(mod_file, 'r', encoding='utf-8') as f:
             content = f.read()
-        
         mod_sexp = loads(content)
     except Exception as e:
         print(f"Error reading or parsing {mod_file.name}: {e}")
         return None
 
-    # KiCad footprints are top-level S-expressions. The 'model' tag is for 3D model links.
     model_elements = [e for e in mod_sexp if isinstance(e, list) and len(e) > 0 and (e[0] == 'model' or e[0] == Symbol('model'))]
     
     modified = False
     
     for model_element in model_elements:
-        # The path is typically the second element in the (model ...) list
         if len(model_element) > 1:
-            # The new 3D model path uses the symbol name and the KiCad project variable
+            # The new 3D model path uses the symbol name
             model_filename = symbol_name + ".stp"
             target_path = f'${{KIPRJMOD}}/Lib-3D-Files/{model_filename}'
             
@@ -195,10 +171,8 @@ def localize_3d_model_path(mod_file: Path, footprint_map: dict):
             modified = True
         
     if modified:
-        # Serialize the modified S-expression list back into a KiCad formatted string
         return dumps(mod_sexp, pretty_print=True)
     
-    # Return None if no 'model' tag was found
     return None 
 
 
@@ -206,9 +180,6 @@ def rename_extracted_assets(tempdir: Path, footprint_map: dict):
     """
     Renames the extracted .kicad_mod and .stp files in the temporary directory 
     based on the main symbol name from the footprint_map.
-    
-    NOTE: The footprint_map contains: {original_footprint_name: main_symbol_name}
-    It is MODIFIED IN-PLACE to track renamed footprints {symbol_name: symbol_name}.
     """
     renamed_count = 0
     
@@ -217,7 +188,6 @@ def rename_extracted_assets(tempdir: Path, footprint_map: dict):
 
     for mod_file in footprint_files_to_rename:
         footprint_name = mod_file.stem
-        # Look up the main symbol name using the current footprint name
         symbol_name = footprint_map.get(footprint_name)
         
         if symbol_name and symbol_name != footprint_name:
@@ -235,23 +205,15 @@ def rename_extracted_assets(tempdir: Path, footprint_map: dict):
                 
     
     # 2. --- Rename 3D Models (.stp) ---
-    # Create a reverse map based on the *updated* footprint_map.
-    # We use this to check if a 3D model name matches a final Symbol Name.
-    # Note: footprint_map now contains: {original_fp_name: symbol_name} AND {symbol_name: symbol_name}
-
     for stp_file in tempdir.rglob("*.stp"):
         model_name_stem = stp_file.stem
         target_symbol_name = None
         
-        # A. Check if the model name matches a key in the (pre-rename) map 
-        #    (i.e., the original footprint name)
+        # A. Check if the model name matches a key in the (pre-rename) map (original footprint name)
         if model_name_stem in footprint_map:
-            # If the model name is an original footprint name, get the symbol name
             target_symbol_name = footprint_map[model_name_stem]
         
         # B. Check if the model name already matches a symbol name (post-rename name)
-        #    This covers cases where the 3D model was already named correctly 
-        #    OR where the footprint was renamed and the 3D model matches the new footprint name.
         elif model_name_stem in footprint_map.values():
             target_symbol_name = model_name_stem # It is already the symbol name
         
@@ -260,7 +222,6 @@ def rename_extracted_assets(tempdir: Path, footprint_map: dict):
             new_name = target_symbol_name + stp_file.suffix
             new_path = stp_file.parent / new_name
             
-            # Avoid renaming if a file with the target name already exists (e.g., if two FPs share the same 3D model)
             if not new_path.exists():
                 stp_file.rename(new_path)
                 renamed_count += 1
@@ -274,11 +235,13 @@ def rename_extracted_assets(tempdir: Path, footprint_map: dict):
 
     return renamed_count
 
-def append_symbols_from_file(src_sym_file: Path):
+
+def append_symbols_from_file(src_sym_file: Path, rename_assets=False): # <-- RENAME FLAG ADDED
     """
     Appends symbols from a source KiCad library file to the project library.
-    It localizes the footprint link within the symbol and builds a map linking 
+    It localizes the footprint link (to the project library) and builds a map linking 
     Footprint names to their main Symbol names (stored in TEMP_MAP_FILE).
+    If rename_assets is True, the footprint link in the symbol is set to the Symbol Name.
     """
     
     existing_main_symbols = get_existing_main_symbols()
@@ -305,11 +268,9 @@ def append_symbols_from_file(src_sym_file: Path):
 
     # Iterate over the symbol blocks (skipping the main tag)
     for element in src_sexp[1:]: 
-        # Check if the element is a symbol block
         if isinstance(element, list) and len(element) > 1 and (element[0] == 'symbol' or element[0] == Symbol('symbol')):
             
             symbol_name = str(element[1]) 
-            # Get the name without sub-part suffixes (e.g., U1_A -> U1)
             base_name = SUB_PART_PATTERN.sub('', symbol_name)
 
             if base_name not in existing_main_symbols:
@@ -317,34 +278,33 @@ def append_symbols_from_file(src_sym_file: Path):
                 # --- Localization and Mapping ---
                 raw_footprint_name = None
                 
-                # Find the older 'Footprint' property (e.g., ['property', 'Footprint', 'Value', ...])
+                # Find the older 'Footprint' property
                 prop_element = find_sexp_property(element, 'Footprint')
-                
                 if prop_element:
-                    # The value is the third element. Split by ':' to get the name only.
                     raw_footprint_name = str(prop_element[2]).split(':')[-1] 
                     
-                    # Localize the footprint path to the project library name
-                    new_fp_value = f"{PROJECT_FOOTPRINT_LIB_NAME}:{raw_footprint_name}"
+                    # MODIFIED: Use symbol name for the new FP link if renaming is active
+                    fp_name_for_link = base_name if rename_assets else raw_footprint_name
+                    new_fp_value = f"{PROJECT_FOOTPRINT_LIB_NAME}:{fp_name_for_link}"
                     prop_element[2] = new_fp_value 
                     
-                # Find the newer 'footprint' definition list (e.g., ['footprint', 'Lib:FP_Name'])
+                # Find the newer 'footprint' definition list
                 footprint_element = find_sexp_element(element, 'footprint')
                 if footprint_element and len(footprint_element) > 1:
                     fp_value = str(footprint_element[1])
-                    if ':' in fp_value:
-                        name_only = fp_value.split(':')[-1]
-                        # Localize the footprint path
-                        footprint_element[1] = f"{PROJECT_FOOTPRINT_LIB_NAME}:{name_only}"
-                        # If the property wasn't found, use the name from the 'footprint' element for mapping
-                        if not raw_footprint_name:
-                            raw_footprint_name = name_only
+                    name_only = fp_value.split(':')[-1]
                     
+                    # MODIFIED: Use symbol name for the new FP link if renaming is active
+                    fp_name_for_link = base_name if rename_assets else name_only
+                    footprint_element[1] = f"{PROJECT_FOOTPRINT_LIB_NAME}:{fp_name_for_link}"
+                    
+                    if not raw_footprint_name:
+                        raw_footprint_name = name_only
+                        
                 
                 if raw_footprint_name:
-                    # Map the raw footprint name to its main symbol name for 3D localization later
+                    # Map the original footprint name to its main symbol name for asset renaming later
                     footprint_map[raw_footprint_name] = base_name 
-                # ----------------------------------------
 
                 symbols_to_append_sexp.append(element)
                 
@@ -365,37 +325,29 @@ def append_symbols_from_file(src_sym_file: Path):
         project_sym_path = PROJECT_SYMBOL_LIB
         new_file_content = None
         
+        # Logic to append symbols to the project file (omitted for brevity, assume correct)
+        # ... (Same logic as provided in previous snippets) ...
+
+        # Read the existing project library file
         if project_sym_path.exists():
             try:
-                # Read the existing project library file
                 with open(project_sym_path, "r", encoding="utf-8") as f:
                     project_content = f.read()
-                
                 project_sexp = loads(project_content)
-                
-                # Append the new symbol lists directly to the project list
                 project_sexp.extend(symbols_to_append_sexp)
-                
-                # Serialize the entire modified list back to a string
                 new_file_content = dumps(project_sexp, pretty_print=True) 
-
             except Exception as e:
                 print(f"ERROR modifying project library using S-expression parser: {e}. Recreating file.")
                 project_sym_path.unlink(missing_ok=True)
-                new_file_content = None # Fall through to the 'else' block
-        
+                new_file_content = None
+
         if not project_sym_path.exists() or new_file_content is None:
-            # Creation of the very first file or recovery from error: add KiCad library header
+            # Creation of the very first file
             header = [['version', 20211026], ['generator', 'script-generator']]
-            
-            # Combine header and symbols into a single list
             full_sexp = header + symbols_to_append_sexp
-            
-            # Wrap the content in the main KiCad tag for a new file
             new_file_content = dumps(full_sexp, wrap=Symbol('kicad_symbol_lib'), pretty_print=True)
 
         if new_file_content:
-            # Write the final, updated symbol library content
             with open(project_sym_path, "w", encoding="utf-8") as f:
                 f.write(new_file_content)
 
@@ -405,49 +357,46 @@ def append_symbols_from_file(src_sym_file: Path):
     return appended_any
 
 
-def process_zip(zip_file, rename_assets=False): # <--- Corrected argument name: zip_file
+def process_zip(zip_file, rename_assets=False): # <-- CORRECTED ARGUMENT NAME
     """Processes a single ZIP file: extracts, adds symbols (localizing footprint links and building a map), 
     localizes 3D model paths in footprints, and copies footprints and 3D models to project folders."""
 
     tempdir = INPUT_ZIP_FOLDER / "temp_extracted"
-    # Ensure a clean temporary directory
     if tempdir.exists():
         shutil.rmtree(tempdir)
     tempdir.mkdir(exist_ok=True)
 
-    # Clear any previous map file before starting the new process
     if TEMP_MAP_FILE.exists():
         TEMP_MAP_FILE.unlink()
         
     try:
-        # Extract all contents of the ZIP file
-        with zipfile.ZipFile(zip_file, 'r') as zip_ref: # <--- Use zip_file
+        # Use zip_file for extraction
+        with zipfile.ZipFile(zip_file, 'r') as zip_ref: 
             zip_ref.extractall(tempdir)
     except Exception as e:
-        print(f"ERROR extracting ZIP file {zip_file.name}: {e}") # <--- Use zip_file
+        print(f"ERROR extracting ZIP file {zip_file.name}: {e}")
         shutil.rmtree(tempdir)
         return
 
     symbols_added = False
 
-    # --- 1. Process Symbols (Builds the footprint_to_symbol_map) ---
+    # --- 1. Process Symbols (Builds the footprint_to_symbol_map and updates symbol link) ---
     for sym_file in tempdir.rglob("*.kicad_sym"):
-        if append_symbols_from_file(sym_file):
+        # CRITICAL: Pass rename_assets flag to update symbol-to-footprint link
+        if append_symbols_from_file(sym_file, rename_assets=rename_assets): 
             symbols_added = True
 
-    # If no symbols were added and no map was created, skip the rest
     if not symbols_added and not TEMP_MAP_FILE.exists():
         print("\nWarning: Skipping footprint and 3D model copy because no new symbols were added.")
         shutil.rmtree(tempdir)
         return
         
-    # Load the map now, which contains the Footprint name -> Main Symbol name link
     footprint_map = {}
     if TEMP_MAP_FILE.exists():
         with open(TEMP_MAP_FILE, 'r') as f:
             footprint_map = json.load(f)
 
-    # --- 1b. RENAME ASSETS (INCLUDED LOGIC) ---
+    # --- 1b. RENAME ASSETS (Footprints and 3D Models) ---
     if rename_assets:
         print("INFO: Renaming of Footprints/3D Models is ENABLED.")
         rename_count = rename_extracted_assets(tempdir, footprint_map)
@@ -457,32 +406,30 @@ def process_zip(zip_file, rename_assets=False): # <--- Corrected argument name: 
                 with open(TEMP_MAP_FILE, 'r') as f:
                     footprint_map = json.load(f)
         print(f"INFO: Renamed {rename_count} asset file(s).")
-    # -------------------------------------------
     
     # --- 2. Process Footprints (Localize 3D Path and Copy) ---
+    # mod_file will be the renamed file if rename_assets was True
     for mod_file in tempdir.rglob("*.kicad_mod"):
         dest = PROJECT_FOOTPRINT_LIB / mod_file.name
 
         if dest.exists():
             print(f"Warning: Skipped footprint \"{mod_file.name}\": Already exists in \"{PROJECT_FOOTPRINT_LIB.name}\"")
         else:
-            # Modify the content string, localizing the 3D model path if a mapping exists
+            # Modify the content string, localizing the 3D model path 
             modified_content = localize_3d_model_path(mod_file, footprint_map)
 
             if modified_content is not None:
-                # Write the localized content
                 with open(dest, 'w', encoding='utf-8') as f:
                     f.write(modified_content)
                 print(f"Added footprint \"{mod_file.name}\" to \"{PROJECT_FOOTPRINT_LIB.name}\" (3D path localized)")
             else:
-                # If localization failed or wasn't needed, copy the original file
                 shutil.copy(mod_file, dest)
                 print(f"Warning: Added footprint \"{mod_file.name}\" to \"{PROJECT_FOOTPRINT_LIB.name}\" (3D path NO localization)")
 
     # --- 3. Process 3D Models (Copy the Symbol-Named STP files) ---
     copied_3d_count = 0
+    # stp_file will be the renamed file if rename_assets was True
     for stp_file in tempdir.rglob("*.stp"):
-        # Copy to the 3D directory using its current (potentially renamed) name
         dest_file = PROJECT_3D_DIR / stp_file.name
         
         if dest_file.exists():
@@ -499,20 +446,19 @@ def process_zip(zip_file, rename_assets=False): # <--- Corrected argument name: 
     if copied_3d_count == 0:
         print("No new 3D model files found or copied.")
 
-    # Clean up temp directory and map file
     shutil.rmtree(tempdir)
     if TEMP_MAP_FILE.exists():
         TEMP_MAP_FILE.unlink()
 
-
 def purge_zip_contents(zip_path: Path):
     """
     Deletes symbols, footprints, and 3D models from the project libraries 
-    that were contained within the specified ZIP file. Uses S-expression parsing 
-    to reliably remove symbol blocks and their associated sub-parts.
+    that were contained within the specified ZIP file.
+    
+    It checks for both original asset names (from the ZIP) and renamed 
+    assets (named after their main symbol name).
     """
     tempdir = INPUT_ZIP_FOLDER / "temp_extracted_purge"
-    # Ensure a clean temporary directory for reading the ZIP contents
     if tempdir.exists():
         shutil.rmtree(tempdir)
     tempdir.mkdir(exist_ok=True)
@@ -527,106 +473,121 @@ def purge_zip_contents(zip_path: Path):
         shutil.rmtree(tempdir)
         return
 
-    # --- 1. Identify Symbols to Delete (using S-expression to read) ---
-    # This list will contain the base names (e.g., 'Resistor')
-    symbols_to_delete = []
+    # --- 1. Identify Symbols to Delete (Main Symbol Names) ---
+    symbols_to_delete = set() 
+    # Also collect original asset names from the ZIP for a comprehensive check
+    original_footprint_stems = set()
+    original_stp_stems = set()
 
     for name in all_zip_names:
-        if name.endswith(".kicad_sym"):
+        name_path = Path(name)
+        
+        if name_path.suffix == ".kicad_sym":
             try:
-                # Extract the symbol file to read its contents
+                # ... (Symbol identification logic remains the same) ...
                 with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                     zip_ref.extract(name, tempdir)
 
                 extracted_sym_file = tempdir / name
                 
-                # Load S-expression content of the symbol file from the ZIP
                 with open(extracted_sym_file, "r", encoding="utf-8") as f:
                     content = f.read()
                 
                 sexp_list = loads(content) 
 
-                # Iterate through all symbol blocks in the extracted file
                 for element in sexp_list[1:]: 
                     if isinstance(element, list) and len(element) > 1 and (element[0] == 'symbol' or element[0] == Symbol('symbol')):
                         sym_name = str(element[1])
-                        # Get the base name (e.g., U1_A -> U1)
                         base_name = SUB_PART_PATTERN.sub('', sym_name)
-                        if base_name not in symbols_to_delete:
-                            symbols_to_delete.append(base_name)
+                        symbols_to_delete.add(base_name)
+                # ... (End of symbol identification logic) ...
 
             except Exception as e:
                 print(f"Error processing symbol file {name} during purge: {e}")
+        
+        elif name_path.suffix == ".kicad_mod":
+            original_footprint_stems.add(name_path.stem)
+        
+        elif name_path.suffix.lower() == ".stp":
+            original_stp_stems.add(name_path.stem)
 
-    # --- 1b. Delete Symbols from Project Library ---
+    
+    # --- 1b. Delete Symbols from Project Library (Logic remains the same as previous fix) ---
     if symbols_to_delete and PROJECT_SYMBOL_LIB.exists():
         print(f"Attempting to delete {len(symbols_to_delete)} main symbols from {PROJECT_SYMBOL_LIB.name}...")
 
         try:
-            # Read the entire project library file
             with open(PROJECT_SYMBOL_LIB, "r", encoding="utf-8") as f:
                 project_content = f.read()
             
             project_sexp = loads(project_content)
-            
             deleted_count = 0
-            
-            # Start the new list with the header tag (kicad_symbol_lib)
             new_project_sexp = [project_sexp[0]] 
             
-            # Iterate through all elements in the project list, starting after the header
             for element in project_sexp[1:]:
-                # Check if the element is a symbol block
                 if isinstance(element, list) and len(element) > 1 and (element[0] == 'symbol' or element[0] == Symbol('symbol')):
                     symbol_name = str(element[1])
                     base_name = SUB_PART_PATTERN.sub('', symbol_name)
                     
-                    # If the base name is scheduled for deletion, skip this element
                     if base_name in symbols_to_delete:
                         deleted_count += 1
                         continue 
                         
-                # Keep all other elements (headers, comments, and symbols that aren't being purged)
                 new_project_sexp.append(element)
                 
             if deleted_count > 0:
-                # Dump the filtered list back to the file
                 with open(PROJECT_SYMBOL_LIB, "w", encoding="utf-8") as f:
                     f.write(dumps(new_project_sexp, pretty_print=True))
-                print(f"Deleted {deleted_count} symbol block(s) corresponding to {len(set(symbols_to_delete))} main symbols.")
+                print(f"Deleted {deleted_count} symbol block(s) corresponding to {len(symbols_to_delete)} main symbols.")
             else:
                 print("No matching symbols found for deletion.")
 
         except Exception as e:
             print(f"ERROR during S-expression symbol deletion: {e}")
-
-
-    # --- 2. Identify and Delete Footprints (.kicad_mod) ---
-    # Footprints are deleted by file name
-    footprint_names_in_zip = [Path(name).name for name in all_zip_names if name.endswith(".kicad_mod")]
-
+    
+    # --- 2. Delete Footprints (.kicad_mod) ---
     deleted_fp_count = 0
-    for fp_name in footprint_names_in_zip:
-        fp_path = PROJECT_FOOTPRINT_LIB / fp_name
-        if fp_path.exists():
-            fp_path.unlink()
+    stems_checked = set() # To prevent double-deletion
+
+    # Check for original names AND renamed (symbol) names
+    stems_to_check = original_footprint_stems.union(symbols_to_delete)
+    
+    for stem in stems_to_check: 
+        # 1. Check for the original name (or the symbol name, if it was already named that way)
+        fp_path_original = PROJECT_FOOTPRINT_LIB / (stem + ".kicad_mod")
+        
+        if fp_path_original.exists():
+            fp_path_original.unlink()
             deleted_fp_count += 1
+            
+        # 2. Check for the renamed name (which is always the symbol name)
+        # This is only necessary if the stem we checked above was an original FP name, 
+        # AND that original FP name is different from the symbol name.
+        if stem in original_footprint_stems and stem in symbols_to_delete and stem not in stems_checked:
+            # We already covered the symbol name case implicitly in the union,
+            # but to be explicit about deleting both files if they coexist, 
+            # we must find the corresponding symbol. However, without the original map, 
+            # we trust that deleting files named after the symbol name is sufficient 
+            # because the *original* FP name might have been deleted in the previous block.
+            pass # The union handles this case most efficiently.
+
+        stems_checked.add(stem)
 
     print(f"Deleted {deleted_fp_count} footprints from {PROJECT_FOOTPRINT_LIB.name}.")
-
-
-    # --- 3. Identify and Delete 3D Models (.stp) ---
+    
+    # --- 3. Delete 3D Models (.stp) ---
     deleted_3d_count = 0
-    # 3D models are deleted by file name
-    stp_names_in_zip = [Path(name).name for name in all_zip_names if name.lower().endswith(".stp")]
+    
+    # Check for original 3D model names AND renamed (symbol) 3D model names
+    stems_to_check = original_stp_stems.union(symbols_to_delete)
 
-    for stp_name in stp_names_in_zip:
-        stp_path = PROJECT_3D_DIR / stp_name
+    for stem in stems_to_check:
+        stp_path = PROJECT_3D_DIR / (stem + ".stp")
+        
         if stp_path.exists():
             stp_path.unlink()
             deleted_3d_count += 1
-
+            
     print(f"Deleted {deleted_3d_count} 3D model files from {PROJECT_3D_DIR.name}.")
 
-    # Cleanup temp directory
     shutil.rmtree(tempdir)

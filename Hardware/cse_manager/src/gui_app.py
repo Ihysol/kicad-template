@@ -642,7 +642,7 @@ def create_gui():
             # --- NEW CHECKBOX FOR RENAMING LOGIC ---
             rename_chk = dpg.add_checkbox(
                 label="Rename Footprints / 3D Models",
-                default_value=True, # Default to True for a safety feature
+                default_value=False, # Default to True for a safety feature
                 tag="rename_assets_chk"
             )
         with dpg.tooltip(parent=rename_chk):
