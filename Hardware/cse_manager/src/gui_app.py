@@ -13,7 +13,6 @@ import webbrowser
 import tkinter as tk
 from tkinter import filedialog as fd
 
-FONT_PATH = "fonts/NotoSans-Regular.ttf" 
 FONT_SIZE = 18
 
 # Cache of main symbols already in the project library
@@ -48,64 +47,112 @@ FULL_LOG_TEXT_TAG = "full_log_text_area"
 HYPERLINK_THEME_TAG = "hyperlink_theme" 
 # -------------------------
 
+def find_font_recursively(font_name: str) -> Path | None:
+    """
+    Search recursively for a font file.
+    Works for both source (.py) and frozen (.exe) modes.
+    """
+    # Determine base path depending on environment
+    if getattr(sys, 'frozen', False):
+        # Running from PyInstaller bundle (.exe)
+        base_dir = Path(sys.executable).resolve().parent
+    else:
+        # Running from source
+        base_dir = Path(__file__).resolve().parent
 
-def load_global_font(font_path: str, size: int = 16, tag: str = "global_font_tag"):
-  """Loads a font and applies it globally to the GUI."""
-  if not os.path.exists(font_path):
-    print(f"Font file not found: {font_path}")
+    # Common fallback search paths
+    search_paths = [
+        base_dir,
+        base_dir / "src",
+        base_dir / "fonts",
+        base_dir / "src" / "fonts",
+    ]
+
+    # Try each search path recursively
+    for root in search_paths:
+        if root.exists():
+            for path in root.rglob(font_name):
+                return path
+
+    print(f"⚠️ Font '{font_name}' not found in {base_dir} or common subdirectories.")
     return None
 
-  try:
+
+def load_font_recursively(font_name: str, size: int = 18):
+    """Try to load the font recursively; fallback to default if missing."""
+    font_path = find_font_recursively(font_name)
+    if not font_path:
+        print(f"⚠️ Using default DearPyGui font (couldn't find '{font_name}')")
+        return
+
     with dpg.font_registry():
-      font = dpg.add_font(font_path, size, tag=tag)
-      dpg.bind_font(font)
-      return font
-  except Exception as e:
-    print(f"Error loading font '{font_path}': {e}")
-    return None
+        font = dpg.add_font(str(font_path), size)
+        dpg.bind_font(font)
+        print(f"✅ Loaded font: {font_path}")
 
+    with dpg.font_registry():
+        font = dpg.add_font(str(font_path), size)
+        dpg.bind_font(font)
+        print(f"✅ Loaded font: {font_path}")
 
 # ===================================================
 # --- CORE LOGIC & EXECUTION ---
 # ===================================================
 
 def execute_library_action(paths, is_purge, rename_assets: bool):
-  """
-  Executes library action.
-  - In .py mode: spawn subprocess to run CLI.
-  - In EXE mode: call CLI function directly.
-  """
-  success = False
-  output_lines = []
-
-  # Detect if running as EXE
-  running_as_exe = getattr(sys, 'frozen', False)
-
-  try:
-    # We will consistently use the subprocess mechanism for robust argument passing
-    python_exe = sys.executable
-    action_str = "purge" if is_purge else "process"
-    
-    # Build the command list
-    cmd = [python_exe, str(CLI_SCRIPT_PATH), action_str]
-    
-    # --- NEW: Add the rename-assets flag if enabled and the action is process ---
-    if rename_assets and not is_purge:
-      cmd.append("--rename-assets")
-    # -----------------------------------------------------------------------------
-      
-    cmd.extend([str(p) for p in paths])
-    
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
-    output_lines = (result.stdout + result.stderr).splitlines()
-    success = result.returncode == 0
-
-  except Exception as e:
-    output_lines = [f"CRITICAL ERROR: {e}"]
+    """
+    Executes the CLI either as subprocess (in .py mode) or direct import (in .exe mode).
+    """
     success = False
+    output_lines = []
 
-  # Join back for logging
-  return success, "\n".join(output_lines)
+    running_as_exe = getattr(sys, 'frozen', False)
+
+    try:
+        if running_as_exe:
+            # Direct import avoids launching a 2nd EXE instance
+            import cli_main
+            from io import StringIO
+            import contextlib
+
+            # Capture output
+            buffer = StringIO()
+            with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+                argv_backup = sys.argv
+                sys.argv = ["cli_main", "purge" if is_purge else "process"]
+                if rename_assets and not is_purge:
+                    sys.argv.append("--rename-assets")
+                sys.argv.extend([str(p) for p in paths])
+
+                try:
+                    cli_main.main()  # assuming your CLI script has main()
+                    success = True
+                except SystemExit as e:
+                    success = (e.code == 0)
+                finally:
+                    sys.argv = argv_backup
+
+            output_lines = buffer.getvalue().splitlines()
+
+        else:
+            # Normal subprocess for development (when not bundled)
+            python_exe = sys.executable
+            action_str = "purge" if is_purge else "process"
+            cmd = [python_exe, str(CLI_SCRIPT_PATH), action_str]
+            if rename_assets and not is_purge:
+                cmd.append("--rename-assets")
+            cmd.extend([str(p) for p in paths])
+
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+            output_lines = (result.stdout + result.stderr).splitlines()
+            success = result.returncode == 0
+
+    except Exception as e:
+        output_lines = [f"CRITICAL ERROR: {e}"]
+        success = False
+
+    return success, "\n".join(output_lines)
+
 
 
 def update_existing_symbols_cache():
@@ -538,7 +585,8 @@ def create_gui():
   dpg.create_context()
   
   
-  load_global_font(FONT_PATH, size=FONT_SIZE)
+  load_font_recursively("NotoSans-Regular.ttf", size=FONT_SIZE)
+
 
   
   dpg.create_viewport(
