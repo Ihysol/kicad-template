@@ -34,7 +34,7 @@ except ImportError as e:
 
 # --- Constants for DPG Tags ---
 WINDOW_WIDTH = 900
-WINDOW_HEIGHT = 650 
+WINDOW_HEIGHT = 750 
 CURRENT_PATH_TAG = "current_path_text" 
 FILE_COUNT_TAG = "file_count_text" 
 FILE_CHECKBOXES_CONTAINER = "file_checkboxes_container" 
@@ -723,25 +723,25 @@ def create_gui():
 
     dpg.add_separator()
     
-    # Hyperlinks Section
     with dpg.group(horizontal=True):
-        # Author Link
-        author_link = dpg.add_button(
-            label="By: Ihysol (Tobias Gent)",
-            callback=lambda s, a: open_url(s, a, "https://github.com/Ihysol"), 
-            small=True
-        )
-        dpg.bind_item_theme(author_link, HYPERLINK_THEME_TAG)
-        
-        dpg.add_text("")
-        
-        # Issues Link
-        issues_link = dpg.add_button(
-            label="Report Bug / Suggest Feature",
-            callback=lambda s, a: open_url(s, a, "https://github.com/Ihysol/kicad-template"), 
-            small=True
-        )
-        dpg.bind_item_theme(issues_link, HYPERLINK_THEME_TAG)
+      # Author Link
+      author_link = dpg.add_button(
+          label="By: Ihysol (Tobias Gent)",
+          callback=lambda s, a: open_url(s, a, "https://github.com/Ihysol"),
+          small=True
+      )
+      dpg.bind_item_theme(author_link, HYPERLINK_THEME_TAG)
+
+      # Separator
+      dpg.add_spacer(width=5)
+
+      # Issues Link
+      issues_link = dpg.add_button(
+          label="Report Bug / Suggest Feature",
+          callback=lambda s, a: open_url(s, a, "https://github.com/Ihysol/kicad-template"),
+          small=True
+      )
+      dpg.bind_item_theme(issues_link, HYPERLINK_THEME_TAG)
 
     # --- FINAL SETUP AND INITIAL LOAD ---
     dpg.show_viewport()
