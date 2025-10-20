@@ -48,9 +48,9 @@ project_file = find_upward("*.kicad_pro", base_path)
 if not project_file:
     raise RuntimeError("No KiCad project (*.kicad_pro) found.")
 PROJECT_DIR = project_file.parent
-PROJECT_SYMBOL_LIB = PROJECT_DIR / "Lib-Symbols" / "ProjectSymbols.kicad_sym"
-PROJECT_FOOTPRINT_LIB = PROJECT_DIR / "Lib-Footprints" / "ProjectFootprints.pretty"
-PROJECT_3D_DIR = PROJECT_DIR / "Lib-3D-Files"
+PROJECT_SYMBOL_LIB = PROJECT_DIR / "symbols" / "ProjectSymbols.kicad_sym"
+PROJECT_FOOTPRINT_LIB = PROJECT_DIR / "footprints" / "ProjectFootprints.pretty"
+PROJECT_3D_DIR = PROJECT_DIR / "3dmodels"
 PROJECT_FOOTPRINT_LIB_NAME = (
     PROJECT_FOOTPRINT_LIB.stem
 )  # used for footprint path localization (e.g., ProjectFootprints:FP_Name)
