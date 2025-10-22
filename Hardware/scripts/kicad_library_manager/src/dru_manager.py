@@ -30,7 +30,7 @@ def get_pcb_layer_count(pcb_file: Path) -> int:
             break
 
     if not layers_block:
-        print("❌ No (layers ...) block found in PCB file")
+        print("No (layers ...) block found in PCB file")
         pause_if_frozen()
         sys.exit(1)
 
@@ -62,9 +62,9 @@ print("🔍 Searching for KiCad board...")
 pcb = find_upward("*.kicad_pcb", Path.cwd())
 
 if pcb:
-    print(f"✅ Found board: {pcb}")
+    print(f"Found board: {pcb}")
 else:
-    print("❌ No .kicad_pcb file found")
+    print("No .kicad_pcb file found")
     pause_if_frozen()
     sys.exit(1)
 
@@ -74,7 +74,7 @@ print(f"Detected {layer_count} copper layers in {pcb.name}")
 # --- Find DRC template directory ---
 dru_template_dir = find_upward("dru_templates", Path.cwd())
 if not dru_template_dir:
-    print("❌ No 'dru_templates' folder found")
+    print("No 'dru_templates' folder found")
     pause_if_frozen()
     sys.exit(1)
 
@@ -85,7 +85,7 @@ if layer_count >= 4:
 
 src = find_upward(template_name, dru_template_dir)
 if not src or not src.exists():
-    print(f"❌ Could not find template: {template_name}")
+    print(f"Could not find template: {template_name}")
     pause_if_frozen()
     sys.exit(1)
 
@@ -96,6 +96,6 @@ if not dst:
 
 # --- Copy file ---
 shutil.copyfile(src, dst)
-print(f"✅ Applied {src.name} → {dst.parent.name}/{dst.name}")
+print(f"Applied {src.name} -> {dst.parent.name}/{dst.name}")
 
 pause_if_frozen()

@@ -928,7 +928,7 @@ def update_drc_rules(sender=None, app_data=None):
 
         # Step 5: Copy file
         shutil.copyfile(src, dst)
-        log_message(None, None, f"[OK] Applied {src.name} → {dst.name}")
+        log_message(None, None, f"[OK] Applied {src.name} -> {dst.name}")
         log_message(None, None, "[SUCCESS] DRC updated successfully.")
 
     except Exception as e:
@@ -1054,9 +1054,9 @@ def create_gui():
                 dpg.add_spacer(height=5)
                 dpg.add_button(label="Update DRC Rules", width=220, callback=update_drc_rules)
                 dpg.add_separator()
-                dpg.add_text("• Detects nearest .kicad_pcb file")
-                dpg.add_text("• Counts copper layers automatically")
-                dpg.add_text("• Copies matching dru_X_layer.kicad_dru to Project.kicad_dru")
+                dpg.add_text("- Detects nearest .kicad_pcb file")
+                dpg.add_text("- Counts copper layers automatically")
+                dpg.add_text("- Copies matching dru_X_layer.kicad_dru to Project.kicad_dru")
 
 
         # ✅ Separator moved outside tab_bar
