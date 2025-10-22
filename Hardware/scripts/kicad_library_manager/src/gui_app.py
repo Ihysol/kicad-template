@@ -821,19 +821,42 @@ def open_url(sender, app_data, url):
         )
 
 def on_tab_change(sender, app_data, user_data):
-    """Callback triggered when switching between ZIP and Symbol tabs."""
-    active_tab_label = dpg.get_item_label(app_data)
+    """Robust tab change handler that updates visible action buttons."""
+    try:
+        active_tab = dpg.get_item_label(dpg.get_value("source_tab_bar"))
+    except Exception:
+        log_message(None, None, "[WARN] Could not detect active tab.")
+        return
 
-    if active_tab_label == "ZIP Archives":
+    # Normalize (ignore case)
+    active_tab = active_tab.lower().strip()
+
+    # ZIP tab active
+    if "zip" in active_tab or "import" in active_tab:
         dpg.show_item("zip_action_group")
         dpg.hide_item("symbol_action_group")
         log_message(None, None, "[INFO] Switched to ZIP Archives tab.")
 
-    elif active_tab_label == "Project Symbols":
+    # Project Symbols tab active
+    elif "symbol" in active_tab or "export" in active_tab:
         dpg.hide_item("zip_action_group")
         dpg.show_item("symbol_action_group")
-        log_message(None, None, "[INFO] Switched to Project Symbols tab. Refreshing symbol list...")
-        refresh_symbol_list()  # 🔁 Auto-refresh list every time you switch here
+        refresh_symbol_list()
+        log_message(None, None, "[INFO] Switched to Project Symbols tab.")
+
+    # DRC tab active
+    elif "drc" in active_tab:
+        dpg.hide_item("zip_action_group")
+        dpg.hide_item("symbol_action_group")
+        log_message(None, None, "[INFO] Switched to DRC Manager tab.")
+
+    else:
+        # Fallback
+        dpg.hide_item("zip_action_group")
+        dpg.hide_item("symbol_action_group")
+        log_message(None, None, "[WARN] Unknown tab selected.")
+
+
 
 
 def refresh_symbol_list():
@@ -1156,9 +1179,15 @@ def export_action(sender, app_data):
     )
     from sexpdata import loads, Symbol
 
-    active_tab = dpg.get_item_label(dpg.get_value("source_tab_bar"))
-    if active_tab != "Project Symbols":
-        log_message(None, None, "Export is only available in the Project Symbols tab.")
+    # --- Detect active tab robustly ---
+    try:
+        active_tab_tag = dpg.get_value("source_tab_bar")
+        active_tab_label = dpg.get_item_label(active_tab_tag)
+    except Exception:
+        active_tab_label = ""
+
+    if "symbol" not in active_tab_label.lower():
+        log_message(None, None, "[WARN] Export is only available in the Project Symbols tab.")
         return
 
     # --- Collect selected symbols ---
@@ -1258,6 +1287,7 @@ def export_action(sender, app_data):
             log_message(None, None, "[WARN] Could not determine output directory.")
     else:
         log_message(None, None, "[FAIL] Export returned no files.")
+
 
 
 if __name__ == "__main__":
