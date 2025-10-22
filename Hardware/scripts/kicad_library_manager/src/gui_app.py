@@ -14,7 +14,7 @@ import json  # <-- ADDED FOR PERSISTENCE
 import tkinter as tk
 from tkinter import filedialog as fd
 from sexpdata import loads, Symbol
-
+import shutil
 
 
 FONT_SIZE = 18
@@ -852,6 +852,89 @@ def refresh_symbol_list():
             tag = f"symbol_checkbox_{i}"
             dpg.add_checkbox(label=name, tag=tag, default_value=False)
             
+def update_drc_rules(sender=None, app_data=None):
+    """Detects layer count and applies the matching DRC template."""
+    try:
+        # Step 1: Find .kicad_pcb file
+        cwd = Path.cwd()
+        pcb = None
+        for parent in [cwd] + list(cwd.parents):
+            matches = list(parent.glob("*.kicad_pcb"))
+            if matches:
+                pcb = matches[0]
+                break
+
+        if not pcb:
+            log_message(None, None, "[FAIL] No .kicad_pcb file found.")
+            return
+
+        log_message(None, None, f"Found PCB file: {pcb.name}")
+
+        # Step 2: Parse layers
+        with open(pcb, "r", encoding="utf-8") as f:
+            sexpr = loads(f.read())
+
+        layers_block = None
+        for e in sexpr:
+            if isinstance(e, list) and len(e) > 0 and e[0] == Symbol("layers"):
+                layers_block = e
+                break
+
+        if not layers_block:
+            log_message(None, None, "[FAIL] No (layers ...) block found in PCB file.")
+            return
+
+        copper_layers = [
+            layer for layer in layers_block[1:]
+            if isinstance(layer, list)
+            and len(layer) > 1
+            and str(layer[1]).endswith(".Cu")
+        ]
+
+        layer_count = len(copper_layers)
+        log_message(None, None, f"🧩 Detected {layer_count} copper layers")
+
+        # Step 3: Find matching .dru file
+        dru_template_dir = None
+        for parent in [cwd] + list(cwd.parents):
+            candidate = parent / "dru_templates"
+            if candidate.exists() and candidate.is_dir():
+                dru_template_dir = candidate
+                break
+
+        if not dru_template_dir:
+            log_message(None, None, "[FAIL] No 'dru_templates' folder found.")
+            return
+
+        src = None
+        for file in dru_template_dir.glob(f"dru_{layer_count}_layer.kicad_dru"):
+            src = file
+            break
+
+        if not src or not src.exists():
+            log_message(None, None, f"[FAIL] No template found for {layer_count} layers.")
+            return
+
+        # Step 4: Find Project.kicad_dru destination
+        dst = None
+        for parent in [cwd] + list(cwd.parents):
+            matches = list(parent.glob("Project.kicad_dru"))
+            if matches:
+                dst = matches[0]
+                break
+
+        if not dst:
+            dst = Path.cwd() / "Project.kicad_dru"
+
+        # Step 5: Copy file
+        shutil.copyfile(src, dst)
+        log_message(None, None, f"[OK] Applied {src.name} → {dst.name}")
+        log_message(None, None, "[SUCCESS] DRC updated successfully.")
+
+    except Exception as e:
+        log_message(None, None, f"[FAIL] DRC update failed: {e}")
+
+            
 # ===================================================
 # --- GUI SETUP ---
 # ===================================================
@@ -928,11 +1011,11 @@ def create_gui():
         dpg.add_separator()
 
         # --- Input Source Tabs ---
-        dpg.add_text("2. Select Input Source:", color=[255, 255, 0])
+        dpg.add_text("2. Select Mode:", color=[255, 255, 0])
 
         with dpg.tab_bar(tag="source_tab_bar", callback=on_tab_change):
             # --- ZIP Archive Tab ---
-            with dpg.tab(label="ZIP Archives", tag="zip_tab"):
+            with dpg.tab(label="Import ZIP Archives", tag="zip_tab"):
                 with dpg.group(horizontal=True):
                     dpg.add_text("Total ZIP files found: 0", tag=FILE_COUNT_TAG, color=[0, 255, 0])
                     dpg.add_button(label="Refresh ZIPs", callback=refresh_file_list, small=True)
@@ -949,7 +1032,7 @@ def create_gui():
                     pass
 
             # --- Project Symbols Tab ---
-            with dpg.tab(label="Project Symbols", tag="symbol_tab"):
+            with dpg.tab(label="Export Project Symbols", tag="symbol_tab"):
                 with dpg.group(horizontal=True):
                     dpg.add_text("Total symbols found: 0", tag="symbol_count_text", color=[0, 255, 0])
                     dpg.add_button(label="Refresh Symbols", callback=lambda s,a: refresh_symbol_list(), small=True)
@@ -964,6 +1047,17 @@ def create_gui():
                     tag="symbol_checkboxes_container", width=-1, height=180, border=True
                 ):
                     pass
+                
+            # --- DRC Manager Tab ---
+            with dpg.tab(label="DRC Manager", tag="drc_tab"):
+                dpg.add_text("Auto-Apply DRC Rules Based on PCB Layer Count", color=[255, 255, 0])
+                dpg.add_spacer(height=5)
+                dpg.add_button(label="Update DRC Rules", width=220, callback=update_drc_rules)
+                dpg.add_separator()
+                dpg.add_text("• Detects nearest .kicad_pcb file")
+                dpg.add_text("• Counts copper layers automatically")
+                dpg.add_text("• Copies matching dru_X_layer.kicad_dru to Project.kicad_dru")
+
 
         # ✅ Separator moved outside tab_bar
         dpg.add_separator()
