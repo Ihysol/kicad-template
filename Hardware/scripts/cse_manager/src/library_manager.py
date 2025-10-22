@@ -6,6 +6,8 @@ from dotenv import load_dotenv
 import zipfile
 from pathlib import Path
 import json
+from datetime import datetime
+
 
 # --- S-expression Library ---
 from sexpdata import loads, dumps, Symbol
@@ -659,3 +661,142 @@ def purge_zip_contents(zip_path: Path):
     print(f"Deleted {deleted_3d_count} 3D model files from {PROJECT_3D_DIR.name}.")
 
     shutil.rmtree(tempdir)
+    
+def export_symbols(symbol_names: list[str], output_dir: Path | None = None):
+    import tempfile
+    from zipfile import ZipFile
+    from datetime import datetime
+
+    if not symbol_names:
+        print("ERROR: No symbols selected for export.")
+        return False
+
+    base_dir = INPUT_ZIP_FOLDER.parent
+    export_root = base_dir / "library_output"
+    os.makedirs(export_root, exist_ok=True)
+
+    # Load project symbol library
+    try:
+        with open(PROJECT_SYMBOL_LIB, "r", encoding="utf-8") as f:
+            project_lib_content = f.read()
+        project_lib_sexp = loads(project_lib_content)
+    except Exception as e:
+        print(f"ERROR: Could not parse project symbol library: {e}")
+        return False
+
+    # Extract header
+    header = []
+    if isinstance(project_lib_sexp, list):
+        for e in project_lib_sexp:
+            if isinstance(e, list) and len(e) == 2 and isinstance(e[0], Symbol):
+                header.append(e)
+            else:
+                break
+
+    exported_files = []
+    print(f"Preparing export for {len(symbol_names)} symbol(s)...")
+
+    for symbol_name in symbol_names:
+        # Normalize names
+        clean_name = SUB_PART_PATTERN.sub("", symbol_name)
+        internal_symbol_name = clean_name[4:] if clean_name.upper().startswith("LIB_") else clean_name
+
+        # ZIP name keeps LIB_
+        zip_name = clean_name if clean_name.upper().startswith("LIB_") else f"LIB_{clean_name}"
+        internal_folder = internal_symbol_name
+
+        export_zip_path = export_root / f"{zip_name}_export.zip"
+
+        # Temporary workspace
+        tempdir = Path(tempfile.mkdtemp())
+        part_root = tempdir / internal_folder
+        kicad_root = part_root / "KiCad"
+        model_root = part_root / "3D"
+        kicad_root.mkdir(parents=True, exist_ok=True)
+        model_root.mkdir(parents=True, exist_ok=True)
+
+        # --- Find the requested symbol ---
+        export_symbol = None
+        for element in project_lib_sexp[1:]:
+            if isinstance(element, list) and len(element) > 1 and element[0] == Symbol("symbol"):
+                base_name = SUB_PART_PATTERN.sub("", str(element[1]))
+                if base_name == internal_symbol_name:
+                    export_symbol = element
+                    break
+
+        if not export_symbol:
+            print(f"[WARN] Symbol '{internal_symbol_name}' not found in {PROJECT_SYMBOL_LIB.name}")
+            shutil.rmtree(tempdir)
+            continue
+
+        # --- Extract associated footprint name from symbol ---
+        footprint_name = None
+        # Try (property "Footprint" "...")
+        for e in export_symbol:
+            if isinstance(e, list) and len(e) >= 3 and str(e[0]) == "property" and str(e[1]) == "Footprint":
+                raw_fp = str(e[2])
+                if ":" in raw_fp:
+                    footprint_name = raw_fp.split(":")[-1]
+                else:
+                    footprint_name = raw_fp
+                break
+        # Try (footprint "...")
+        if not footprint_name:
+            for e in export_symbol:
+                if isinstance(e, list) and len(e) >= 2 and str(e[0]) == "footprint":
+                    raw_fp = str(e[1])
+                    if ":" in raw_fp:
+                        footprint_name = raw_fp.split(":")[-1]
+                    else:
+                        footprint_name = raw_fp
+                    break
+
+        # --- Create symbol file ---
+        single_symbol_lib = dumps(
+            [Symbol("kicad_symbol_lib"), *header, export_symbol],
+            pretty_print=True
+        )
+        export_sym_path = kicad_root / f"{internal_symbol_name}.kicad_sym"
+        with open(export_sym_path, "w", encoding="utf-8") as f:
+            f.write(single_symbol_lib)
+
+        # --- Copy associated footprint (if found) ---
+        if footprint_name:
+            fp_candidates = [
+                PROJECT_FOOTPRINT_LIB / f"{footprint_name}.kicad_mod",
+                PROJECT_FOOTPRINT_LIB / f"{internal_symbol_name}.kicad_mod",
+                PROJECT_FOOTPRINT_LIB / f"LIB_{internal_symbol_name}.kicad_mod",
+            ]
+            for fp_file in fp_candidates:
+                if fp_file.exists():
+                    shutil.copy(fp_file, kicad_root / fp_file.name)
+                    break
+            else:
+                print(f"[WARN] Footprint '{footprint_name}' not found for {internal_symbol_name}")
+        else:
+            print(f"[WARN] No footprint property found for {internal_symbol_name}")
+
+        # --- Copy 3D model (if found) ---
+        model_candidates = [
+            PROJECT_3D_DIR / f"{internal_symbol_name}.stp",
+            PROJECT_3D_DIR / f"{footprint_name}.stp" if footprint_name else None,
+            PROJECT_3D_DIR / f"LIB_{internal_symbol_name}.stp",
+        ]
+        for model_file in model_candidates:
+            if model_file and model_file.exists():
+                shutil.copy(model_file, model_root / model_file.name)
+                break
+
+        # --- Create ZIP ---
+        with ZipFile(export_zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+            for path in part_root.rglob("*"):
+                if path.is_file():
+                    z.write(path, path.relative_to(tempdir))
+
+        shutil.rmtree(tempdir)
+        exported_files.append(export_zip_path)
+        print(f"[OK] Exported '{internal_symbol_name}' → {export_zip_path.name}")
+
+    print(f"[OK] Created {len(exported_files)} ZIP file(s) in {export_root.resolve()}")
+    print(f"[OK] Output directory: {export_root.resolve()}")
+    return exported_files

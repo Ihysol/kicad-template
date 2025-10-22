@@ -609,6 +609,23 @@ def open_folder_in_explorer(sender, app_data):
             is_cli_output=False,
         )
 
+def open_output_folder(sender=None, app_data=None):
+    """Reuses the existing open_folder_in_explorer() to open the output folder."""
+    try:
+        from library_manager import INPUT_ZIP_FOLDER
+        output_folder = INPUT_ZIP_FOLDER.parent / "library_output"
+        os.makedirs(output_folder, exist_ok=True)
+
+        # Temporarily set the GUI label so open_folder_in_explorer() reads the right path
+        dpg.set_value(CURRENT_PATH_TAG, f"Current Folder: {output_folder}")
+        open_folder_in_explorer(sender, app_data)
+
+        # Restore the previous path afterwards (optional)
+        input_folder = INPUT_ZIP_FOLDER.resolve()
+        dpg.set_value(CURRENT_PATH_TAG, f"Current Folder: {input_folder}")
+
+    except Exception as e:
+        log_message(None, None, f"ERROR: Could not open output folder: {e}")
 
 def show_native_folder_dialog(sender, app_data):
     """Triggers the folder selection dialog and initiates UI reload if files are found."""
@@ -876,8 +893,26 @@ def create_gui():
                 callback=lambda s, a: process_action(s, a, True),
                 width=200,
             )
-            dpg.add_text("NOTE: Only checked files will be used.")
 
+            
+            with dpg.group(horizontal=True, horizontal_spacing=20):
+                # Export button
+                dpg.add_button(
+                    label="EXPORT SELECTED",
+                    tag="export_btn",
+                    callback=lambda s, a: export_action(s, a),
+                    width=200,
+                )
+
+                # --- NEW: Open output folder button ---
+                dpg.add_button(
+                    label="OPEN OUTPUT FOLDER",
+                    tag="open_output_btn",
+                    callback=open_output_folder,
+                    width=200,
+                )
+            dpg.add_text("NOTE: Only checked files will be used.")
+            
             dpg.add_separator()  # This separator correctly ends Section 3 logic
 
         # Log Output Section
@@ -929,6 +964,56 @@ def create_gui():
 
     dpg.start_dearpygui()
     dpg.destroy_context()
+    
+    
+def export_action(sender, app_data):
+    """Exports all currently checked ZIP files (their symbols) as an export ZIP."""
+    selected_files = []
+
+    def collect_checked_checkboxes(parent_tag):
+        """Recursively collect all checked checkboxes from the UI."""
+        children = dpg.get_item_children(parent_tag, 1)
+        for child in children:
+            if dpg.get_item_type(child) == "mvAppItemType::mvCheckbox":
+                if dpg.get_value(child):
+                    label = dpg.get_item_label(child)
+                    if label:
+                        selected_files.append(label)
+            else:
+                # Recurse into nested groups
+                collect_checked_checkboxes(child)
+
+    # Start recursive scan
+    if dpg.does_item_exist(FILE_CHECKBOXES_CONTAINER):
+        collect_checked_checkboxes(FILE_CHECKBOXES_CONTAINER)
+
+    if not selected_files:
+        log_message(None, None, "No files selected for export.")
+        return
+
+    log_message(None, None, f"--- Exporting {len(selected_files)} file(s) ---")
+
+    # Use filenames (without extension) as symbol names
+    selected_symbols = [Path(f).stem for f in selected_files]
+
+    python_exe = sys.executable
+    cmd = [python_exe, str(CLI_SCRIPT_PATH), "export", "--symbols"] + selected_symbols
+
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore"
+        )
+        for line in (result.stdout + result.stderr).splitlines():
+            log_message(None, None, line, add_timestamp=False, is_cli_output=True)
+
+        if result.returncode == 0:
+            log_message(None, None, "[OK] Export completed successfully.")
+        else:
+            log_message(None, None, "[FAIL] Export failed.")
+    except Exception as e:
+        log_message(None, None, f"CRITICAL ERROR running export: {e}")
+
+
 
 
 if __name__ == "__main__":
