@@ -1171,13 +1171,14 @@ def create_gui():
     
     
 def export_action(sender, app_data):
-    """Exports selected project symbols (only if both symbol + footprint exist)."""
+    """Exports selected project symbols (only if symbol + footprint + 3D model exist)."""
     from library_manager import (
         export_symbols,
         PROJECT_SYMBOL_LIB,
         PROJECT_FOOTPRINT_LIB,
     )
     from sexpdata import loads, Symbol
+    import os
 
     # --- Detect active tab robustly ---
     try:
@@ -1231,10 +1232,10 @@ def export_action(sender, app_data):
 
     valid_symbols = []
     missing_footprints = []
+    missing_models = []
 
-    # --- Resolve and verify footprints ---
+    # --- Resolve and verify footprints + 3D models ---
     for sym in selected_symbols:
-        # Try both LIB_ and non-prefixed
         match_candidates = [sym, f"LIB_{sym}"]
 
         footprint_name = None
@@ -1247,7 +1248,6 @@ def export_action(sender, app_data):
             missing_footprints.append(sym)
             continue
 
-        # Extract only the footprint file name (strip library prefix if any)
         footprint_basename = footprint_name.split(":")[-1]
 
         # Search recursively inside ProjectFootprints.pretty
@@ -1257,10 +1257,47 @@ def export_action(sender, app_data):
                 found_fp = fp
                 break
 
-        if found_fp:
-            valid_symbols.append(sym)
-        else:
+        if not found_fp:
             missing_footprints.append(sym)
+            continue
+
+        # --- Parse 3D models inside footprint ---
+        model_files = []
+        try:
+            with open(found_fp, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("(model "):
+                        model_path = line.split("(model", 1)[1].split(")", 1)[0].strip().strip('"')
+                        model_path = os.path.expandvars(model_path)
+                        model_path = model_path.replace("${KICAD7_3DMODEL_DIR}", "3d_models")
+                        model_path = model_path.replace("${KICAD6_3DMODEL_DIR}", "3d_models")
+                        model_path = model_path.replace("${KICAD8_3DMODEL_DIR}", "3d_models")
+                        model_files.append(Path(model_path))
+        except Exception:
+            pass
+
+        # Verify that all model files exist
+        resolved_models = []
+        for m in model_files:
+            if m.is_absolute() and m.exists():
+                resolved_models.append(m)
+            else:
+                # try relative to footprint library
+                test_path = (PROJECT_FOOTPRINT_LIB.parent / m).resolve()
+                if test_path.exists():
+                    resolved_models.append(test_path)
+                else:
+                    missing_models.append(str(m))
+
+        if resolved_models:
+            log_message(None, None, f"[INFO] Found {len(resolved_models)} 3D file(s) for {sym}: {', '.join(str(m.name) for m in resolved_models)}")
+
+        valid_symbols.append({
+            "symbol": sym,
+            "footprint": found_fp,
+            "models": resolved_models,
+        })
 
     # --- Logging results ---
     if not valid_symbols:
@@ -1268,18 +1305,15 @@ def export_action(sender, app_data):
         return
 
     if missing_footprints:
-        log_message(
-            None,
-            None,
-            f"[WARN] Skipping {len(missing_footprints)} symbol(s) missing or unresolved footprints: "
-            f"{', '.join(missing_footprints)}",
-        )
+        log_message(None, None, f"[WARN] Missing footprints for: {', '.join(missing_footprints)}")
+
+    if missing_models:
+        log_message(None, None, f"[WARN] Missing 3D models: {', '.join(missing_models)}")
 
     # --- Export ---
-    export_paths = export_symbols(valid_symbols)
+    export_paths = export_symbols([entry["symbol"] for entry in valid_symbols])
     if export_paths:
         log_message(None, None, f"[OK] Exported {len(export_paths)} ZIP file(s) successfully.")
-        # Each entry is a Path; show directory info safely
         output_dir = export_paths[0].parent if hasattr(export_paths[0], "parent") else None
         if output_dir:
             log_message(None, None, f"[OK] Output directory: {output_dir}")
