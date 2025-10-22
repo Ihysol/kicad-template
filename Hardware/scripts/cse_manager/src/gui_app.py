@@ -13,6 +13,8 @@ import json  # <-- ADDED FOR PERSISTENCE
 # Import Tkinter for the native file dialog
 import tkinter as tk
 from tkinter import filedialog as fd
+from sexpdata import loads, Symbol
+
 
 
 FONT_SIZE = 18
@@ -151,6 +153,28 @@ def update_config_rename_checkbox(sender, app_data, user_data):
 # --- CORE LOGIC & EXECUTION ---
 # ===================================================
 
+def list_project_symbols():
+    """Returns a list of all symbol names in the current ProjectSymbols.kicad_sym."""
+    from library_manager import PROJECT_SYMBOL_LIB, SUB_PART_PATTERN
+    if not PROJECT_SYMBOL_LIB.exists():
+        return []
+
+    try:
+        with open(PROJECT_SYMBOL_LIB, "r", encoding="utf-8") as f:
+            content = f.read()
+        sexp = loads(content)
+    except Exception as e:
+        print(f"ERROR reading symbol library: {e}")
+        return []
+
+    symbols = []
+    for el in sexp[1:]:
+        if isinstance(el, list) and len(el) > 1 and str(el[0]) == "symbol":
+            name = str(el[1])
+            base = SUB_PART_PATTERN.sub("", name)
+            if base not in symbols:
+                symbols.append(base)
+    return symbols
 
 def execute_library_action(paths, is_purge, rename_assets: bool):
     """
@@ -730,6 +754,8 @@ def initial_load():
     else:
         log_message(None, None, "No ZIP files found in the default folder.")
     build_file_list_ui()
+    refresh_symbol_list()
+
 
 
 def open_url(sender, app_data, url):
@@ -742,11 +768,35 @@ def open_url(sender, app_data, url):
             None, None, f"ERROR: Failed to open web browser: {e}", is_cli_output=False
         )
 
+def on_tab_change(sender, app_data, user_data):
+    """Callback triggered when switching between ZIP and Symbol tabs."""
+    active_tab_label = dpg.get_item_label(app_data)
+    if active_tab_label == "ZIP Archives":
+        dpg.show_item("zip_action_group")
+        dpg.hide_item("symbol_action_group")
+    elif active_tab_label == "Project Symbols":
+        dpg.hide_item("zip_action_group")
+        dpg.show_item("symbol_action_group")
 
+def refresh_symbol_list():
+    """Refreshes the list of symbols found in ProjectSymbols.kicad_sym."""
+    symbols = list_project_symbols()
+    dpg.delete_item("symbol_checkboxes_container", children_only=True)
+    dpg.set_value("symbol_count_text", f"Total symbols found: {len(symbols)}")
+
+    if not symbols:
+        with dpg.group(parent="symbol_checkboxes_container"):
+            dpg.add_text("No symbols found in ProjectSymbols.kicad_sym.", color=[255, 100, 100])
+        return
+
+    with dpg.group(parent="symbol_checkboxes_container"):
+        for i, name in enumerate(symbols):
+            tag = f"symbol_checkbox_{i}"
+            dpg.add_checkbox(label=name, tag=tag, default_value=False)
+            
 # ===================================================
 # --- GUI SETUP ---
 # ===================================================
-
 
 def create_gui():
     """Sets up the DearPyGui context, themes, and main window layout."""
@@ -754,9 +804,7 @@ def create_gui():
 
     # --- Load Configuration for initial values ---
     config = load_config()
-    # Default to False if the key is not found in the config file
     rename_default = config.get(RENAME_ASSETS_KEY, False)
-    # ---------------------------------------------
 
     load_font_recursively("NotoSans-Regular.ttf", size=FONT_SIZE)
 
@@ -774,7 +822,7 @@ def create_gui():
             dpg.add_theme_color(dpg.mvThemeCol_ChildBg, (25, 25, 25))
     dpg.bind_theme(global_theme)
 
-    # --- Log Color Themes (Themed InputText to act as read-only colored text) ---
+    # --- Log Color Themes ---
     def setup_log_theme(tag, color):
         with dpg.theme(tag=tag):
             with dpg.theme_component(dpg.mvInputText):
@@ -787,7 +835,7 @@ def create_gui():
     setup_log_theme("error_log_theme", (255, 50, 50))
     setup_log_theme("success_log_theme", (0, 255, 0))
 
-    # --- Hyperlink Theme (Makes buttons look like clickable blue text) ---
+    # --- Hyperlink Theme ---
     with dpg.theme(tag=HYPERLINK_THEME_TAG):
         with dpg.theme_component(dpg.mvButton):
             dpg.add_theme_color(dpg.mvThemeCol_Button, (0, 0, 0, 0))
@@ -807,213 +855,205 @@ def create_gui():
     ):
         dpg.set_primary_window("main_window", True)
 
-        # 1. Folder Selection and Current Path
-        dpg.add_text(
-            "1. Select Archive Folder (ZIPs will be scanned automatically):",
-            color=[0, 255, 255],
-        )
-
+        dpg.add_text("1. Select Archive Folder (ZIPs will be scanned automatically):", color=[0, 255, 255])
         with dpg.group(horizontal=True):
-            dpg.add_button(
-                label="Select ZIP-Folder", callback=show_native_folder_dialog
-            )
+            dpg.add_button(label="Select ZIP-Folder", callback=show_native_folder_dialog)
+            dpg.add_button(label=f"Open ZIP-Folder", callback=open_folder_in_explorer)
 
-            # Button to open the current path in the OS file explorer
-            explorer_button = dpg.add_button(
-                label=f"Open ZIP-Folder", callback=open_folder_in_explorer
-            )
-
-        dpg.add_text(
-            "Current Folder: (Initializing...)",
-            tag=CURRENT_PATH_TAG,
-            wrap=0,
-            color=[150, 150, 255],
-        )
-
+        dpg.add_text("Current Folder: (Initializing...)", tag=CURRENT_PATH_TAG, wrap=0, color=[150, 150, 255])
         dpg.add_separator()
 
-        # 2. Active Files Header, Count, and Refresh (Refresh Button Moved Here)
-        dpg.add_text(
-            "2. Active ZIP Archives for Processing (Status Check on Load):",
-            color=[255, 255, 0],
-        )
+        dpg.add_text("2. Select Input Source:", color=[255, 255, 0])
 
-        with dpg.group(horizontal=True):
-            dpg.add_text("Total files found: 0", tag=FILE_COUNT_TAG, color=[0, 255, 0])
+        # --- Tab Bar ---
+        with dpg.tab_bar(tag="source_tab_bar", callback=on_tab_change):
+            # ZIP Archive Tab
+            with dpg.tab(label="ZIP Archives", tag="zip_tab"):
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Total ZIP files found: 0", tag=FILE_COUNT_TAG, color=[0, 255, 0])
+                    dpg.add_button(label="Refresh ZIPs", callback=refresh_file_list, small=True)
+                with dpg.child_window(tag=FILE_CHECKBOXES_CONTAINER, width=-1, height=180, border=True):
+                    pass
 
-            # Refresh Button is located here (Section 2)
-            dpg.add_button(label="Refresh List", callback=refresh_file_list, small=True)
+            # Project Symbols Tab
+            with dpg.tab(label="Project Symbols", tag="symbol_tab"):
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Total symbols found: 0", tag="symbol_count_text", color=[0, 255, 0])
+                    dpg.add_button(label="Refresh Symbols", callback=lambda s,a: refresh_symbol_list(), small=True)
+                with dpg.child_window(tag="symbol_checkboxes_container", width=-1, height=180, border=True):
+                    pass
 
-        # Container for the file checkboxes and status text
-        with dpg.child_window(
-            tag=FILE_CHECKBOXES_CONTAINER, width=-1, height=180, border=True
-        ):
-            pass
-
-        # 3. Action Buttons and Toggles (Hidden until ZIPs are loaded)
+        # --- Action Section ---
         with dpg.group(tag=ACTION_SECTION_TAG, show=False):
-            with dpg.group(horizontal=True):
-                dpg.add_button(
-                    label="Select All",
-                    callback=lambda s, a: toggle_all_checkboxes(s, a, True),
-                )
-                dpg.add_button(
-                    label="Deselect All",
-                    callback=lambda s, a: toggle_all_checkboxes(s, a, False),
-                )
-
-                dpg.add_separator()
-
-            with dpg.group(horizontal=True, horizontal_spacing=20):
-                # Button to initiate the library processing (import/copy)
+            # ZIP Actions
+            with dpg.group(tag="zip_action_group", horizontal=True, horizontal_spacing=20):
                 dpg.add_button(
                     label="PROCESS / IMPORT",
                     tag="process_btn",
                     callback=lambda s, a: process_action(s, a, False),
                     width=200,
                 )
-
-                # --- MODIFIED CHECKBOX FOR PERSISTENCE ---
-                rename_chk = dpg.add_checkbox(
-                    label="Use Symbolname as Footprint and 3D-Model name",
-                    default_value=rename_default,  # <-- Uses the value loaded from config.json
-                    tag="rename_assets_chk",
-                    callback=update_config_rename_checkbox,  # <-- Saves the value when it changes
+                dpg.add_button(
+                    label="PURGE / DELETE",
+                    tag="purge_btn",
+                    callback=lambda s, a: process_action(s, a, True),
+                    width=200,
                 )
-                with dpg.tooltip(parent=rename_chk):
-                    dpg.add_text(
-                        "If checked, the system attempts to rename footprints and .step files inside the ZIP to match the primary symbol name before import."
-                    )
-                # ---------------------------------------
 
-                # Button to initiate the library purging (delete)
-            dpg.add_button(
-                label="PURGE / DELETE",
-                tag="purge_btn",
-                callback=lambda s, a: process_action(s, a, True),
-                width=200,
-            )
-
-            
-            with dpg.group(horizontal=True, horizontal_spacing=20):
-                # Export button
+            # Symbol Actions
+            with dpg.group(tag="symbol_action_group", horizontal=True, horizontal_spacing=20, show=False):
                 dpg.add_button(
                     label="EXPORT SELECTED",
                     tag="export_btn",
                     callback=lambda s, a: export_action(s, a),
                     width=200,
                 )
-
-                # --- NEW: Open output folder button ---
                 dpg.add_button(
                     label="OPEN OUTPUT FOLDER",
                     tag="open_output_btn",
                     callback=open_output_folder,
                     width=200,
                 )
-            dpg.add_text("NOTE: Only checked files will be used.")
-            
-            dpg.add_separator()  # This separator correctly ends Section 3 logic
 
-        # Log Output Section
+            dpg.add_text("NOTE: Only checked files will be used.")
+            dpg.add_separator()
+
+        # --- Log Section ---
         with dpg.group(horizontal=True):
             dpg.add_text("CLI Output Log:")
             dpg.add_button(label="Clear Log", callback=clear_log, small=True)
-            dpg.add_button(
-                label="Show Full Log", callback=show_full_log_popup, small=True
-            )
+            dpg.add_button(label="Show Full Log", callback=show_full_log_popup, small=True)
 
-        # Log Text Area (Display actual log entries)
-        with dpg.child_window(
-            tag=LOG_WINDOW_CHILD_TAG, width=-1, height=150, border=True
-        ):
+        with dpg.child_window(tag=LOG_WINDOW_CHILD_TAG, width=-1, height=150, border=True):
             dpg.add_group(tag=LOG_TEXT_TAG, width=-1)
 
-        # Hidden tag used to control auto-scrolling
         dpg.add_input_int(tag=SCROLL_FLAG_TAG, default_value=0, show=False)
-
         dpg.add_separator()
 
         with dpg.group(horizontal=True):
-            # Author Link
-            author_link = dpg.add_button(
-                label="By: Ihysol (Tobias Gent)",
-                callback=lambda s, a: open_url(s, a, "https://github.com/Ihysol"),
-                small=True,
-            )
+            author_link = dpg.add_button(label="By: Ihysol (Tobias Gent)", callback=lambda s, a: open_url(s, a, "https://github.com/Ihysol"), small=True)
             dpg.bind_item_theme(author_link, HYPERLINK_THEME_TAG)
-
-            # Separator
             dpg.add_spacer(width=5)
-
-            # Issues Link
-            issues_link = dpg.add_button(
-                label="Report Bug / Suggest Feature",
-                callback=lambda s, a: open_url(
-                    s, a, "https://github.com/Ihysol/kicad-template"
-                ),
-                small=True,
-            )
+            issues_link = dpg.add_button(label="Report Bug / Suggest Feature", callback=lambda s, a: open_url(s, a, "https://github.com/Ihysol/kicad-template"), small=True)
             dpg.bind_item_theme(issues_link, HYPERLINK_THEME_TAG)
 
-    # --- FINAL SETUP AND INITIAL LOAD ---
     dpg.show_viewport()
-
-    # Run the initial scan/load logic
     initial_load()
-
     dpg.start_dearpygui()
     dpg.destroy_context()
     
     
 def export_action(sender, app_data):
-    """Exports all currently checked ZIP files (their symbols) as an export ZIP."""
-    selected_files = []
+    """Exports selected project symbols (only if both symbol + footprint exist)."""
+    from library_manager import (
+        export_symbols,
+        PROJECT_SYMBOL_LIB,
+        PROJECT_FOOTPRINT_LIB,
+    )
+    from sexpdata import loads, Symbol
 
-    def collect_checked_checkboxes(parent_tag):
-        """Recursively collect all checked checkboxes from the UI."""
-        children = dpg.get_item_children(parent_tag, 1)
-        for child in children:
-            if dpg.get_item_type(child) == "mvAppItemType::mvCheckbox":
-                if dpg.get_value(child):
-                    label = dpg.get_item_label(child)
-                    if label:
-                        selected_files.append(label)
-            else:
-                # Recurse into nested groups
-                collect_checked_checkboxes(child)
-
-    # Start recursive scan
-    if dpg.does_item_exist(FILE_CHECKBOXES_CONTAINER):
-        collect_checked_checkboxes(FILE_CHECKBOXES_CONTAINER)
-
-    if not selected_files:
-        log_message(None, None, "No files selected for export.")
+    active_tab = dpg.get_item_label(dpg.get_value("source_tab_bar"))
+    if active_tab != "Project Symbols":
+        log_message(None, None, "Export is only available in the Project Symbols tab.")
         return
 
-    log_message(None, None, f"--- Exporting {len(selected_files)} file(s) ---")
+    # --- Collect selected symbols ---
+    selected_symbols = []
+    children = dpg.get_item_children("symbol_checkboxes_container", 1)
+    if children:
+        for group in children:
+            for child in dpg.get_item_children(group, 1):
+                if (
+                    dpg.get_item_type(child) == "mvAppItemType::mvCheckbox"
+                    and dpg.get_value(child)
+                ):
+                    selected_symbols.append(dpg.get_item_label(child))
 
-    # Use filenames (without extension) as symbol names
-    selected_symbols = [Path(f).stem for f in selected_files]
+    if not selected_symbols:
+        log_message(None, None, "[WARN] No symbols selected for export.")
+        return
 
-    python_exe = sys.executable
-    cmd = [python_exe, str(CLI_SCRIPT_PATH), "export", "--symbols"] + selected_symbols
-
+    # --- Parse ProjectSymbols.kicad_sym to resolve footprint field ---
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore"
-        )
-        for line in (result.stdout + result.stderr).splitlines():
-            log_message(None, None, line, add_timestamp=False, is_cli_output=True)
-
-        if result.returncode == 0:
-            log_message(None, None, "[OK] Export completed successfully.")
-        else:
-            log_message(None, None, "[FAIL] Export failed.")
+        with open(PROJECT_SYMBOL_LIB, "r", encoding="utf-8") as f:
+            content = f.read()
+        sexp = loads(content)
     except Exception as e:
-        log_message(None, None, f"CRITICAL ERROR running export: {e}")
+        log_message(None, None, f"[FAIL] Could not read symbol library: {e}")
+        return
 
+    # Build a dictionary: {symbol_name: footprint_name}
+    symbol_footprints = {}
+    for el in sexp[1:]:
+        if isinstance(el, list) and len(el) > 1 and str(el[0]) == "symbol":
+            sym_name = str(el[1])
+            footprint_field = None
+            for item in el:
+                if isinstance(item, list) and len(item) >= 2 and str(item[0]) == "property":
+                    if len(item) > 2 and str(item[1]) == "Footprint":
+                        footprint_field = str(item[2])
+                        break
+            if footprint_field:
+                symbol_footprints[sym_name] = footprint_field
 
+    valid_symbols = []
+    missing_footprints = []
+
+    # --- Resolve and verify footprints ---
+    for sym in selected_symbols:
+        # Try both LIB_ and non-prefixed
+        match_candidates = [sym, f"LIB_{sym}"]
+
+        footprint_name = None
+        for candidate in match_candidates:
+            if candidate in symbol_footprints:
+                footprint_name = symbol_footprints[candidate]
+                break
+
+        if not footprint_name:
+            missing_footprints.append(sym)
+            continue
+
+        # Extract only the footprint file name (strip library prefix if any)
+        footprint_basename = footprint_name.split(":")[-1]
+
+        # Search recursively inside ProjectFootprints.pretty
+        found_fp = None
+        for fp in PROJECT_FOOTPRINT_LIB.rglob("*.kicad_mod"):
+            if fp.stem == footprint_basename:
+                found_fp = fp
+                break
+
+        if found_fp:
+            valid_symbols.append(sym)
+        else:
+            missing_footprints.append(sym)
+
+    # --- Logging results ---
+    if not valid_symbols:
+        log_message(None, None, "[FAIL] No valid symbols found (missing or unresolved footprints).")
+        return
+
+    if missing_footprints:
+        log_message(
+            None,
+            None,
+            f"[WARN] Skipping {len(missing_footprints)} symbol(s) missing or unresolved footprints: "
+            f"{', '.join(missing_footprints)}",
+        )
+
+    # --- Export ---
+    export_paths = export_symbols(valid_symbols)
+    if export_paths:
+        log_message(None, None, f"[OK] Exported {len(export_paths)} ZIP file(s) successfully.")
+        # Each entry is a Path; show directory info safely
+        output_dir = export_paths[0].parent if hasattr(export_paths[0], "parent") else None
+        if output_dir:
+            log_message(None, None, f"[OK] Output directory: {output_dir}")
+        else:
+            log_message(None, None, "[WARN] Could not determine output directory.")
+    else:
+        log_message(None, None, "[FAIL] Export returned no files.")
 
 
 if __name__ == "__main__":
