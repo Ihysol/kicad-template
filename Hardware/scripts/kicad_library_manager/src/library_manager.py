@@ -196,7 +196,7 @@ def localize_3d_model_path(mod_file: Path, footprint_map: dict):
         if len(model_element) > 1:
             # The new 3D model path uses the symbol name
             model_filename = symbol_name + ".stp"
-            target_path = f"${{KIPRJMOD}}/Lib-3D-Files/{model_filename}"
+            target_path = f"${{KIPRJMOD}}/3dmodels/{model_filename}"
 
             # Overwrite the path in the S-expression list
             model_element[1] = target_path
