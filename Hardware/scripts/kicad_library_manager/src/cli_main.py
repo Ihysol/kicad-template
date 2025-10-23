@@ -4,7 +4,6 @@ import argparse
 import locale
 import io
 
-
 def process_cli_action(paths, action, rename_assets=False):
     """
     paths: list of Path objects
@@ -50,7 +49,6 @@ def process_cli_action(paths, action, rename_assets=False):
     except Exception as e:
         return False, f"CLI action failed globally: {e}"
 
-
 # =========================================================
 # UNICODE FIX (Windows): Ensure UTF-8 output for console
 # =========================================================
@@ -77,7 +75,6 @@ from library_manager import (
     purge_zip_contents,
     export_symbols,
 )
-
 
 def parse_arguments(argv=None):
     parser = argparse.ArgumentParser(
@@ -118,7 +115,6 @@ def parse_arguments(argv=None):
         help="ZIP files to act upon. If empty, all zips in folder are used (for process/purge).",
     )
     return parser.parse_args(argv)
-
 
 def run_cli_action(action: str, zip_files=None, input_folder=None, rename_assets=False, symbols=None):
     """
@@ -186,7 +182,6 @@ def run_cli_action(action: str, zip_files=None, input_folder=None, rename_assets
 
     return True, buffer.getvalue()
 
-
 def main():
     args = parse_arguments()
     success, output = run_cli_action(
@@ -198,7 +193,6 @@ def main():
     )
     print(output)
     sys.exit(0 if success else 1)
-
 
 if __name__ == "__main__":
     main()

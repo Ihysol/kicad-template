@@ -16,7 +16,6 @@ from tkinter import filedialog as fd
 from sexpdata import loads, Symbol
 import shutil
 
-
 FONT_SIZE = 18
 
 # Cache of main symbols already in the project library
@@ -50,7 +49,6 @@ except ImportError as e:
     def get_existing_main_symbols():
         return {"RESISTOR_1", "CAP_POL_SMD"}
 
-
 # --- Constants for DPG Tags ---
 WINDOW_WIDTH = 900
 WINDOW_HEIGHT = 750
@@ -65,7 +63,6 @@ FULL_LOG_POPUP_TAG = "full_log_popup"
 FULL_LOG_TEXT_TAG = "full_log_text_area"
 HYPERLINK_THEME_TAG = "hyperlink_theme"
 # -------------------------
-
 
 def find_font_recursively(font_name: str) -> Path | None:
     """
@@ -97,7 +94,6 @@ def find_font_recursively(font_name: str) -> Path | None:
     print(f"⚠️ Font '{font_name}' not found in {base_dir} or common subdirectories.")
     return None
 
-
 def load_font_recursively(font_name: str, size: int = 18):
     """Try to load the font recursively; fallback to default if missing."""
     font_path = find_font_recursively(font_name)
@@ -115,11 +111,9 @@ def load_font_recursively(font_name: str, size: int = 18):
         dpg.bind_font(font)
         print(f"✅ Loaded font: {font_path}")
 
-
 # ===================================================
 # --- PERSISTENCE LOGIC (NEW) ---
 # ===================================================
-
 
 def load_config() -> dict:
     """Loads the configuration dictionary from the JSON file."""
@@ -132,7 +126,6 @@ def load_config() -> dict:
             return {}
     return {}
 
-
 def save_config(key: str, value: any):
     """Saves a single key-value pair to the configuration file."""
     config = load_config()
@@ -143,11 +136,9 @@ def save_config(key: str, value: any):
     except Exception as e:
         print(f"ERROR: Could not save configuration to {CONFIG_FILE.name}: {e}")
 
-
 def update_config_rename_checkbox(sender, app_data, user_data):
     """Callback to save the state of the rename checkbox."""
     save_config(RENAME_ASSETS_KEY, dpg.get_value(sender))
-
 
 # ===================================================
 # --- CORE LOGIC & EXECUTION ---
@@ -232,7 +223,6 @@ def execute_library_action(paths, is_purge, rename_assets: bool):
 
     return success, "\n".join(output_lines)
 
-
 def update_existing_symbols_cache():
     """
     Refreshes the global cache of symbols currently present in the project library
@@ -255,7 +245,6 @@ def update_existing_symbols_cache():
             is_cli_output=False,
         )
         PROJECT_EXISTING_SYMBOLS = set()
-
 
 def check_zip_for_existing_symbols(zip_paths: list[Path]):
     """
@@ -323,11 +312,9 @@ def check_zip_for_existing_symbols(zip_paths: list[Path]):
 
             GUI_FILE_DATA.append(zip_data)
 
-
 # ===================================================
 # --- DPG UTILITIES ---
 # ===================================================
-
 
 def log_message(
     sender,
@@ -382,7 +369,6 @@ def log_message(
     if dpg.does_item_exist(LOG_WINDOW_CHILD_TAG):
         dpg.set_y_scroll(LOG_WINDOW_CHILD_TAG, -1.0)
 
-
 def clear_log(sender, app_data):
     """Clears the visual log and the log history cache."""
     global full_log_history
@@ -390,7 +376,6 @@ def clear_log(sender, app_data):
     full_log_history.clear()
     log_message(None, None, "Log cleared.", add_timestamp=True)
     log_message(None, None, "Ready.", add_timestamp=True)
-
 
 def show_full_log_popup(sender, app_data):
     """Displays a modal window with the entire log history for easy copying."""
@@ -420,7 +405,6 @@ def show_full_log_popup(sender, app_data):
             height=-1,
             tag=FULL_LOG_TEXT_TAG,
         )
-
 
 def build_file_list_ui():
     """Generates the checkboxes and status indicators for all ZIP files in GUI_FILE_DATA."""
@@ -469,7 +453,6 @@ def build_file_list_ui():
                 with dpg.tooltip(parent=checkbox):
                     dpg.add_text(data["tooltip"])
                 dpg.add_text(status_text, color=status_color)
-
 
 def toggle_selection_mode(container=None, btn_tag=None):
     """
@@ -524,7 +507,6 @@ def toggle_selection_mode(container=None, btn_tag=None):
         f"{'Selected' if select_mode else 'Deselected'} {len(checkboxes)} items in {container}.",
     )
 
-
 def get_active_files_for_processing():
     """Returns a list of Path objects for all currently checked ZIP files."""
     global GUI_FILE_DATA
@@ -534,7 +516,6 @@ def get_active_files_for_processing():
         if dpg.does_item_exist(tag) and dpg.get_value(tag):
             active_paths.append(data["path"])
     return active_paths
-
 
 def process_action(sender, app_data, is_purge):
     """
@@ -591,13 +572,11 @@ def process_action(sender, app_data, is_purge):
     )
     log_message(None, None, "", add_timestamp=False)
 
-
 def _init_tkinter_root():
     """Initializes and hides the Tkinter root window for the native dialog."""
     root = tk.Tk()
     root.withdraw()
     return root
-
 
 def select_zip_folder():
     """Uses Tkinter's native dialog to select a folder and returns a list of contained ZIP files."""
@@ -616,7 +595,6 @@ def select_zip_folder():
     finally:
         # Clean up the Tkinter window
         root.destroy()
-
 
 def open_folder_in_explorer(sender, app_data):
     """Opens the currently displayed folder path in the OS file explorer/finder."""
@@ -715,7 +693,6 @@ def show_native_folder_dialog(sender, app_data):
     # Reload the UI with the newly selected folder's content
     reload_folder_from_path(selected_folder_str)
 
-
 def refresh_file_list(sender, app_data):
     """
     Manually triggers a refresh of the file list by re-scanning the current folder path.
@@ -735,7 +712,6 @@ def refresh_file_list(sender, app_data):
 
     log_message(None, None, f"Manually refreshing file list for: {folder_path_str}")
     reload_folder_from_path(folder_path_str)
-
 
 def reload_folder_from_path(folder_path_str):
     """
@@ -770,7 +746,6 @@ def reload_folder_from_path(folder_path_str):
         log_message(None, None, f"ERROR scanning folder: {e}")
         check_zip_for_existing_symbols([])
         build_file_list_ui()
-
 
 def initial_load():
     """Performs setup tasks and loads the default folder path on application startup."""
@@ -807,8 +782,6 @@ def initial_load():
 
     build_file_list_ui()
     refresh_symbol_list()
-
-
 
 def open_url(sender, app_data, url):
     """Opens a specified URL in the default web browser."""
@@ -855,9 +828,6 @@ def on_tab_change(sender, app_data, user_data):
         dpg.hide_item("zip_action_group")
         dpg.hide_item("symbol_action_group")
         log_message(None, None, "[WARN] Unknown tab selected.")
-
-
-
 
 def refresh_symbol_list():
     """Refreshes the list of symbols found in ProjectSymbols.kicad_sym."""
@@ -1081,7 +1051,6 @@ def create_gui():
                 dpg.add_text("- Counts copper layers automatically")
                 dpg.add_text("- Copies matching dru_X_layer.kicad_dru to Project.kicad_dru")
 
-
         # ✅ Separator moved outside tab_bar
         dpg.add_separator()
 
@@ -1166,7 +1135,6 @@ def create_gui():
     initial_load()
     dpg.start_dearpygui()
     dpg.destroy_context()
-
 
     
     
@@ -1321,8 +1289,6 @@ def export_action(sender, app_data):
             log_message(None, None, "[WARN] Could not determine output directory.")
     else:
         log_message(None, None, "[FAIL] Export returned no files.")
-
-
 
 if __name__ == "__main__":
     # Check for required dependencies before starting the GUI

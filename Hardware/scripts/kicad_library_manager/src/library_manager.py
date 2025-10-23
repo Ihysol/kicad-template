@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Cleaned and formatted (conservative refactor) by ChatGPT
+# Original functionality preserved
+
 import os
 import shutil
 import sys
@@ -8,12 +12,10 @@ from pathlib import Path
 import json
 from datetime import datetime
 
-
 # --- S-expression Library ---
 from sexpdata import loads, dumps, Symbol
 
 # ---------------------------
-
 
 def find_upward(target: str, start_path: Path) -> Path | None:
     """
@@ -34,7 +36,6 @@ def find_upward(target: str, start_path: Path) -> Path | None:
             return matches[0]
 
     return None
-
 
 # --- Environment Setup (Load once for all functions) ---
 
@@ -79,13 +80,11 @@ SUB_PART_PATTERN = re.compile(r"_\d(_\d)+$|_\d$")
 # Temporary file to map footprint names (from .kicad_mod) to their main symbol name (for 3D model path linking)
 TEMP_MAP_FILE = INPUT_ZIP_FOLDER / "footprint_to_symbol_map.json"
 
-
 # --------------------------------------------------------------------------------------------------
 #                 CORE FUNCTION LOGIC
 # --------------------------------------------------------------------------------------------------
 
 # --- Helper functions for S-expression parsing ---
-
 
 def find_sexp_element(sexp_list, target_tag):
     """Searches a list of S-expression elements for a list that starts with the target tag."""
@@ -99,7 +98,6 @@ def find_sexp_element(sexp_list, target_tag):
             return element
     return None
 
-
 def find_sexp_property(sexp_list, prop_name):
     """Searches a list of S-expression elements for a KiCad 'property' list with the given name."""
     prop_sym = Symbol("property")
@@ -112,7 +110,6 @@ def find_sexp_property(sexp_list, prop_name):
             if str(element[1]) == prop_name:
                 return element
     return None
-
 
 def list_symbols_simple(sym_file: Path, print_list: bool = True):
     """
@@ -154,11 +151,9 @@ def list_symbols_simple(sym_file: Path, print_list: bool = True):
 
     return symbols
 
-
 def get_existing_main_symbols():
     """Wrapper to get the set of main symbols currently in the project library for quick lookup."""
     return set(list_symbols_simple(PROJECT_SYMBOL_LIB, print_list=False))
-
 
 def localize_3d_model_path(mod_file: Path, footprint_map: dict):
     """
@@ -206,7 +201,6 @@ def localize_3d_model_path(mod_file: Path, footprint_map: dict):
         return dumps(mod_sexp, pretty_print=True)
 
     return None
-
 
 def rename_extracted_assets(tempdir: Path, footprint_map: dict):
     """
@@ -264,7 +258,6 @@ def rename_extracted_assets(tempdir: Path, footprint_map: dict):
         print(f"INFO: Saved updated footprint_map with {len(footprint_map)} entries.")
 
     return renamed_count
-
 
 def append_symbols_from_file(
     src_sym_file: Path, rename_assets=False
@@ -398,7 +391,6 @@ def append_symbols_from_file(
         print(f"No new symbols to append from {src_sym_file.name}")
 
     return appended_any
-
 
 def process_zip(zip_file, rename_assets=False):
     """
@@ -539,7 +531,6 @@ def process_zip(zip_file, rename_assets=False):
         TEMP_MAP_FILE.unlink()
 
     print(f"[OK] Finished importing {zip_file.name}")
-
 
 def purge_zip_contents(zip_path: Path):
     """
