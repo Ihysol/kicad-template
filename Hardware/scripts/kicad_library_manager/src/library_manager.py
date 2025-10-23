@@ -400,109 +400,145 @@ def append_symbols_from_file(
     return appended_any
 
 
-def process_zip(zip_file, rename_assets=False):  # <-- CORRECTED ARGUMENT NAME
-    """Processes a single ZIP file: extracts, adds symbols (localizing footprint links and building a map),
-    localizes 3D model paths in footprints, and copies footprints and 3D models to project folders.
+def process_zip(zip_file, rename_assets=False):
+    """
+    Processes a single ZIP file:
+    - Extracts into a temp directory
+    - Finds KiCad + 3D folders (supports nested /partname/KiCad structures)
+    - Imports symbols, footprints, and 3D models into the project
     """
 
-    tempdir = INPUT_ZIP_FOLDER / "temp_extracted"
+    # --- Normalize paths ---
+    zip_file = Path(str(zip_file).strip()).resolve()
+    tempdir = (INPUT_ZIP_FOLDER / "temp_extracted").resolve()
+
     if tempdir.exists():
         shutil.rmtree(tempdir)
     tempdir.mkdir(exist_ok=True)
 
-    if TEMP_MAP_FILE.exists():
-        TEMP_MAP_FILE.unlink()
+    print(f"[DEBUG] Importing ZIP: {zip_file}")
+    print(f"[DEBUG] Temporary extraction folder: {tempdir}")
 
+    # --- Extract ZIP ---
     try:
-        # Use zip_file for extraction
         with zipfile.ZipFile(zip_file, "r") as zip_ref:
             zip_ref.extractall(tempdir)
     except Exception as e:
-        print(f"ERROR extracting ZIP file {zip_file.name}: {e}")
+        print(f"[FAIL] Error extracting ZIP file {zip_file.name}: {e}")
+        return
+
+    # --- Detect KiCad + 3D folders automatically ---
+    all_dirs = [p for p in tempdir.rglob("*") if p.is_dir()]
+    kicad_root = None
+    model_root = None
+
+    # Find the first matching folders (case-insensitive)
+    for d in all_dirs:
+        if d.name.lower() == "kicad":
+            kicad_root = d
+        elif d.name.lower() == "3d":
+            model_root = d
+
+    # If neither found, check if there's a single nested folder (like LIB_MyPart)
+    if not kicad_root and not model_root:
+        subfolders = [f for f in tempdir.iterdir() if f.is_dir()]
+        if len(subfolders) == 1:
+            # Dive into that folder
+            nested_root = subfolders[0]
+            print(f"[DEBUG] Found nested folder: {nested_root.name}")
+            for d in nested_root.rglob("*"):
+                if d.is_dir() and d.name.lower() == "kicad":
+                    kicad_root = d
+                elif d.is_dir() and d.name.lower() == "3d":
+                    model_root = d
+
+    # Fallbacks
+    if not kicad_root:
+        kicad_root = tempdir
+        print("[WARN] KiCad folder not found, using temp root.")
+    if not model_root:
+        model_root = tempdir
+        print("[WARN] 3D folder not found, using temp root.")
+
+    print(f"[DEBUG] KiCad root detected: {kicad_root}")
+    print(f"[DEBUG] 3D root detected: {model_root}")
+
+    # --- Step 1: Import symbols ---
+    symbol_files = list(kicad_root.rglob("*.kicad_sym"))
+    print(f"[DEBUG] Found {len(symbol_files)} .kicad_sym files.")
+
+    if not symbol_files:
+        print(f"[FAIL] No symbol files found in extracted ZIP {zip_file.name}.")
         shutil.rmtree(tempdir)
         return
 
     symbols_added = False
-
-    # --- 1. Process Symbols (Builds the footprint_to_symbol_map and updates symbol link) ---
-    for sym_file in tempdir.rglob("*.kicad_sym"):
-        # CRITICAL: Pass rename_assets flag to update symbol-to-footprint link
+    for sym_file in symbol_files:
+        print(f"[DEBUG] Processing symbol file: {sym_file}")
         if append_symbols_from_file(sym_file, rename_assets=rename_assets):
             symbols_added = True
 
     if not symbols_added and not TEMP_MAP_FILE.exists():
-        print(
-            "\nWarning: Skipping footprint and 3D model copy because no new symbols were added."
-        )
+        print("[WARN] No new symbols added — skipping footprints and 3D models.")
         shutil.rmtree(tempdir)
         return
 
+    # --- Step 2: Load footprint-symbol map ---
     footprint_map = {}
     if TEMP_MAP_FILE.exists():
         with open(TEMP_MAP_FILE, "r") as f:
             footprint_map = json.load(f)
+        print(f"[DEBUG] Loaded footprint map with {len(footprint_map)} entries.")
 
-    # --- 1b. RENAME ASSETS (Footprints and 3D Models) ---
+    # --- Step 3: Rename assets (if enabled) ---
     if rename_assets:
-        print("INFO: Renaming of Footprints/3D Models is ENABLED.")
+        print("[INFO] Renaming of Footprints/3D Models ENABLED.")
         rename_count = rename_extracted_assets(tempdir, footprint_map)
-        if rename_count > 0:
-            # Reload the map after renaming to ensure subsequent steps use the updated keys
-            if TEMP_MAP_FILE.exists():
-                with open(TEMP_MAP_FILE, "r") as f:
-                    footprint_map = json.load(f)
-        print(f"INFO: Renamed {rename_count} asset file(s).")
+        if rename_count > 0 and TEMP_MAP_FILE.exists():
+            with open(TEMP_MAP_FILE, "r") as f:
+                footprint_map = json.load(f)
+        print(f"[INFO] Renamed {rename_count} assets.")
 
-    # --- 2. Process Footprints (Localize 3D Path and Copy) ---
-    # mod_file will be the renamed file if rename_assets was True
-    for mod_file in tempdir.rglob("*.kicad_mod"):
+    # --- Step 4: Import footprints ---
+    for mod_file in kicad_root.rglob("*.kicad_mod"):
         dest = PROJECT_FOOTPRINT_LIB / mod_file.name
-
         if dest.exists():
-            print(
-                f'Warning: Skipped footprint "{mod_file.name}": Already exists in "{PROJECT_FOOTPRINT_LIB.name}"'
-            )
+            print(f'[WARN] Skipped footprint "{mod_file.name}": already exists.')
+            continue
+
+        modified = localize_3d_model_path(mod_file, footprint_map)
+        if modified:
+            with open(dest, "w", encoding="utf-8") as f:
+                f.write(modified)
+            print(f'[OK] Added footprint "{mod_file.name}" with localized 3D path.')
         else:
-            # Modify the content string, localizing the 3D model path
-            modified_content = localize_3d_model_path(mod_file, footprint_map)
+            shutil.copy(mod_file, dest)
+            print(f'[OK] Added footprint "{mod_file.name}" (no localization).')
 
-            if modified_content is not None:
-                with open(dest, "w", encoding="utf-8") as f:
-                    f.write(modified_content)
-                print(
-                    f'Added footprint "{mod_file.name}" to "{PROJECT_FOOTPRINT_LIB.name}" (3D path localized)'
-                )
-            else:
-                shutil.copy(mod_file, dest)
-                print(
-                    f'Warning: Added footprint "{mod_file.name}" to "{PROJECT_FOOTPRINT_LIB.name}" (3D path NO localization)'
-                )
-
-    # --- 3. Process 3D Models (Copy the Symbol-Named STP files) ---
+    # --- Step 5: Import 3D models ---
     copied_3d_count = 0
-    # stp_file will be the renamed file if rename_assets was True
-    for stp_file in tempdir.rglob("*.stp"):
+    for stp_file in model_root.rglob("*.stp"):
         dest_file = PROJECT_3D_DIR / stp_file.name
-
         if dest_file.exists():
-            print(
-                f'Warning: Skipped 3D model "{stp_file.name}": Already exists in "{PROJECT_3D_DIR.name}"'
-            )
+            print(f'[WARN] Skipped 3D model "{stp_file.name}" (already exists).')
             continue
 
         try:
             shutil.copy(stp_file, dest_file)
-            print(f'Copied 3D model "{stp_file.name}" to "{PROJECT_3D_DIR.name}"')
             copied_3d_count += 1
+            print(f'[OK] Copied 3D model "{stp_file.name}" → {PROJECT_3D_DIR.name}')
         except Exception as e:
-            print(f"ERROR copying 3D model {stp_file.name}: {e}")
+            print(f"[FAIL] Error copying 3D model {stp_file.name}: {e}")
 
     if copied_3d_count == 0:
-        print("No new 3D model files found or copied.")
+        print("[WARN] No new 3D models found or copied.")
 
+    # --- Cleanup ---
     shutil.rmtree(tempdir)
     if TEMP_MAP_FILE.exists():
         TEMP_MAP_FILE.unlink()
+
+    print(f"[OK] Finished importing {zip_file.name}")
 
 
 def purge_zip_contents(zip_path: Path):
@@ -666,8 +702,14 @@ def export_symbols(selected_symbols: list[str]) -> list[Path]:
     """
     Exports selected symbols from ProjectSymbols.kicad_sym, including their footprints and 3D models.
     Each symbol is exported as a separate ZIP archive into /library_output.
+    Structure:
+        LIB_partname.zip/
+          └── partname/
+              ├── KiCad/
+              └── 3D/
     """
-    from sexpdata import loads, Symbol
+    from sexpdata import loads, Symbol, dumps
+    import unicodedata
 
     export_paths = []
 
@@ -707,8 +749,12 @@ def export_symbols(selected_symbols: list[str]) -> list[Path]:
         output_root = INPUT_ZIP_FOLDER.parent / "library_output"
         output_root.mkdir(parents=True, exist_ok=True)
 
+        # Helper: normalize names
+        def normalize_name(s: str) -> str:
+            return re.sub(r"[^A-Za-z0-9]", "", s).lower()
+
+        # --- Iterate over symbols ---
         for sym in selected_symbols:
-            # Try both LIB_ and non-LIB_ variants
             footprint_ref = None
             for name in [sym, f"LIB_{sym}"]:
                 if name in symbol_footprints:
@@ -722,8 +768,9 @@ def export_symbols(selected_symbols: list[str]) -> list[Path]:
             # --- Locate footprint file ---
             footprint_basename = footprint_ref.split(":")[-1]
             found_fp = None
+            target_norm = normalize_name(footprint_basename)
             for fp in PROJECT_FOOTPRINT_LIB.rglob("*.kicad_mod"):
-                if fp.stem == footprint_basename:
+                if normalize_name(fp.stem) == target_norm:
                     found_fp = fp
                     break
 
@@ -763,77 +810,92 @@ def export_symbols(selected_symbols: list[str]) -> list[Path]:
             symbol_out = kicad_folder / f"{part_name}.kicad_sym"
             with open(symbol_out, "w", encoding="utf-8") as f:
                 f.write("(kicad_symbol_lib (version 20211014) (generator CSE-Manager)\n")
-                f.write("  " + str(single_symbol_sexpr).replace("'", "") + "\n)\n")
+                f.write("  " + dumps(single_symbol_sexpr, pretty_print=True) + "\n)\n")
 
             # --- Copy footprint ---
             fp_out = kicad_folder / found_fp.name
             shutil.copy2(found_fp, fp_out)
 
-            # --- Parse footprint for 3D models ---
+            # --- Parse 3D models (handles all multiline/indented forms) ---
             model_blocks = []
-            current_block = ""
-            with open(found_fp, "r", encoding="utf-8") as f:
-                for line in f:
-                    stripped = line.strip()
-                    if stripped.startswith("(model "):
-                        current_block = stripped
-                        if stripped.endswith(")"):
-                            model_blocks.append(stripped)
-                            current_block = ""
-                    elif current_block:
-                        current_block += " " + stripped
-                        if stripped.endswith(")"):
-                            model_blocks.append(current_block)
-                            current_block = ""
+            collecting = False
+            depth = 0
+            current_block = []
 
-            resolved_models = []
-            for model_entry in model_blocks:
-                try:
-                    model_path = model_entry.split("(model", 1)[1].split("(", 1)[0].strip().strip('"')
-                    if not model_path:
+            with open(found_fp, "r", encoding="utf-8") as f:
+                for raw_line in f:
+                    line = raw_line.strip()
+                    if not collecting and ("(model" in line or line == "model" or line.endswith("model")):
+                        collecting = True
+                        depth = line.count("(") - line.count(")")
+                        current_block = [line]
                         continue
 
-                    # --- Resolve variables ---
-                    model_path = os.path.expandvars(model_path)
+                    if collecting:
+                        current_block.append(line)
+                        depth += line.count("(") - line.count(")")
+                        if depth <= 0:
+                            model_blocks.append(" ".join(current_block))
+                            collecting = False
+                            current_block = []
+
+            resolved_models = []
+            for block in model_blocks:
+                try:
+                    # Extract quoted or unquoted .stp path
+                    match = re.search(r'["\']?([^"\']+\.stp)["\']?', block, flags=re.IGNORECASE)
+                    if not match:
+                        print(f"[WARN] Could not extract model path from block: {block[:80]}...")
+                        continue
+
+                    raw_path = match.group(1).replace("\\", "/")
+                    raw_path = unicodedata.normalize("NFKC", raw_path)
+                    raw_path = raw_path.encode("ascii", "ignore").decode()
+
+                    # Substitute env vars
+                    raw_path = os.path.expandvars(raw_path)
                     for env_var in (
                         "${KICAD7_3DMODEL_DIR}",
                         "${KICAD6_3DMODEL_DIR}",
                         "${KICAD8_3DMODEL_DIR}",
                     ):
-                        model_path = model_path.replace(env_var, "3d_models")
+                        raw_path = raw_path.replace(env_var, "3d_models")
 
-                    model_path_obj = Path(model_path)
+                    model_path = Path(raw_path)
+                    kiprojmod_root = PROJECT_SYMBOL_LIB.parent.parent
 
-                    # Keep ${KIPRJMOD} for later replacement
-                    if "${KIPRJMOD}" in str(model_path_obj):
-                        resolved_models.append(model_path_obj)
-                    elif model_path_obj.is_absolute() and model_path_obj.exists():
-                        resolved_models.append(model_path_obj)
+                    if "${KIPRJMOD}" in str(model_path):
+                        model_path = Path(str(model_path).replace("${KIPRJMOD}", str(kiprojmod_root)))
+
+                    # Resolve and copy
+                    if model_path.exists():
+                        resolved_models.append(model_path)
+                        print(f"[DEBUG] Found 3D model for {sym}: {model_path}")
                     else:
-                        rel_test = (PROJECT_FOOTPRINT_LIB.parent / model_path_obj).resolve()
-                        if rel_test.exists():
-                            resolved_models.append(rel_test)
+                        rel_model = (PROJECT_FOOTPRINT_LIB.parent / model_path.name).resolve()
+                        if rel_model.exists():
+                            resolved_models.append(rel_model)
+                            print(f"[DEBUG] Found relative 3D model for {sym}: {rel_model}")
                         else:
-                            print(f"[WARN] 3D model not found: {model_path_obj}")
-                except Exception:
-                    continue
+                            print(f"[WARN] 3D model not found: {model_path}")
+
+                except Exception as e:
+                    print(f"[WARN] Failed to parse model block: {e}")
 
             # --- Copy 3D models ---
-            kiprojmod_root = PROJECT_SYMBOL_LIB.parent.parent  # project root (2 levels up)
             for model_path in resolved_models:
-                model_str = str(model_path)
-                if "${KIPRJMOD}" in model_str:
-                    model_str = model_str.replace("${KIPRJMOD}", str(kiprojmod_root))
-                    model_path = Path(model_str)
-
                 if model_path.exists():
                     shutil.copy2(model_path, model_folder / model_path.name)
-                else:
-                    print(f"[WARN] 3D model missing: {model_path}")
 
-            # --- Create ZIP ---
+            # --- Create ZIP with correct structure ---
             zip_path = output_root / zip_name
-            shutil.make_archive(str(zip_path.with_suffix("")), "zip", part_folder)
+            # Ensure we zip the parent (output_root) but only include part_folder
+            shutil.make_archive(
+                base_name=str(zip_path.with_suffix("")),
+                format="zip",
+                root_dir=output_root,
+                base_dir=part_folder.name,
+            )
             export_paths.append(zip_path)
 
             print(f"[OK] Exported {zip_name}")
