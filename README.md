@@ -4,7 +4,7 @@
 
 ![](Docs/board_preview.png)
 
-This template provides a clean KiCad repository structure for embedded hardware projects, including a GUI-based import script (`cse_manager`) for component management.
+This template provides a clean KiCad repository structure for embedded hardware projects, including a GUI-based import script (`kicad_library_manager`) for component management.
 
 ---
 
@@ -28,8 +28,8 @@ git clone https://github.com/Ihysol/kicad-template.git
 
 * Add symbols, footprints, and 3D models in `Lib-*` folders
 * Check for existing footprints online (ComponentSearchEngine, Mouser, Digi-Key)
-* Add parts either using the `cse_manager` GUI or manually
-* By default, `cse_manager` uses the `library_input` folder located in the `cse_manager` folder to read component files
+* Add parts either using the `kicad_library_manager` GUI or manually
+* By default, `kicad_library_manager` uses the `library_input` folder located in the `kicad_library_manager` folder to read component files
 * Keep all other libraries local; do not use global libraries
 
 3. **Update this README** to describe your project
@@ -62,10 +62,10 @@ git clone https://github.com/Ihysol/kicad-template.git
 
 ## Scripts & Tools
 
-* The `cse_manager` GUI is located in `Hardware/cse_manager/`
+* The `kicad_library_manager` GUI is located in `Hardware/cse_manager/`
 * Imports and organizes components automatically
 * Can be run as a Python script or standalone executable
-* By default, it uses the `library_input` folder inside the `cse_manager` folder to read component files
+* By default, it uses the `library_input` folder inside the `cse_makicad_library_managernager` folder to read component files
 
 ---
 
