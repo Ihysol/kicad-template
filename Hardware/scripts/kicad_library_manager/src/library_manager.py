@@ -749,7 +749,7 @@ def export_symbols(selected_symbols: list[str]) -> list[Path]:
 
             # --- Prepare folders ---
             part_name = sym
-            zip_name = f"LIB_{part_name}_export.zip"
+            zip_name = f"LIB_{part_name}.zip"
             part_folder = output_root / part_name
             kicad_folder = part_folder / "KiCad"
             model_folder = part_folder / "3D"
