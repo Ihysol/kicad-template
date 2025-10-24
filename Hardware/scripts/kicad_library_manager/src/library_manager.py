@@ -555,24 +555,21 @@ def ensure_project_symbol_header(project_sym_path: Path, project_version: int):
 
 def normalize_expr_for_project(expr, project_version: int):
     """
-    Cleans and adjusts KiCad S-expressions for compatibility between KiCad 8 and 9.
-    - KiCad 8: Removes unsupported tags, hides and repositions properties neatly to the right
-               of the rightmost pin, spaced vertically, left-aligned.
-    - KiCad 9: Ensures missing UUIDs exist.
+    Normalize and clean KiCad S-expressions for cross-version compatibility.
+    - KiCad 8: remove unsupported tags, ensure pin headers, move/hide extra properties
+    - KiCad 9: ensure UUIDs
     """
     from sexpdata import Symbol
     from uuid import uuid4
 
-    HIDDEN_OFFSET_MARGIN_X = 20  # mm extra spacing to the right of rightmost pin
-    HIDDEN_OFFSET_STEP_Y = -2    # vertical spacing between properties
+    HIDDEN_OFFSET_MARGIN_X = 30  # mm right of rightmost pin
+    HIDDEN_OFFSET_STEP_Y = -2    # vertical spacing
     HIDDEN_ROT = 0
 
     # --------------------------------------------------------------------------
-    # Utility functions
+    # Strip unsupported KiCad 9 fields (for KiCad 8)
     # --------------------------------------------------------------------------
-
     def deep_strip(e):
-        """Remove KiCad 9-only constructs that KiCad 8 can't parse."""
         banned = {
             Symbol("uuid"), Symbol("extends"), Symbol("template"),
             Symbol("lib_id"), Symbol("style"), Symbol("parent"),
@@ -590,7 +587,7 @@ def normalize_expr_for_project(expr, project_version: int):
         return cleaned
 
     def strip_hide_flags(e):
-        """Remove invalid or misplaced (hide yes) tags before re-adding them."""
+        """Remove redundant (hide yes) outside effects before rewriting them."""
         if not isinstance(e, list):
             return e
         cleaned = []
@@ -605,8 +602,10 @@ def normalize_expr_for_project(expr, project_version: int):
                 cleaned.append(sub)
         return cleaned
 
+    # --------------------------------------------------------------------------
+    # KiCad 9 UUID management
+    # --------------------------------------------------------------------------
     def add_uuids(e):
-        """Ensure all (symbol ...) blocks have UUIDs for KiCad 9."""
         if isinstance(e, list):
             newnode = [add_uuids(x) for x in e]
             if e and e[0] == Symbol("symbol") and not any(
@@ -616,8 +615,10 @@ def normalize_expr_for_project(expr, project_version: int):
             return newnode
         return e
 
+    # --------------------------------------------------------------------------
+    # KiCad 8: Ensure pin headers exist
+    # --------------------------------------------------------------------------
     def ensure_pin_headers(sym):
-        """Add missing (pin_names)/(pin_numbers) for KiCad 8 compatibility."""
         if not (isinstance(sym, list) and sym and sym[0] == Symbol("symbol")):
             return sym
 
@@ -640,11 +641,10 @@ def normalize_expr_for_project(expr, project_version: int):
     # Find rightmost pin X coordinate
     # --------------------------------------------------------------------------
     def get_rightmost_pin_x(symbol_node):
-        """Scan all (pin ...) elements and return the maximum X coordinate."""
+        """Find the maximum X coordinate of all (pin (at x y rot)) entries."""
         max_x = 0
         for child in symbol_node:
-            if isinstance(child, list) and len(child) > 0 and child[0] == Symbol("pin"):
-                # find (at x y rot)
+            if isinstance(child, list) and child and child[0] == Symbol("pin"):
                 for elem in child:
                     if isinstance(elem, list) and elem and elem[0] == Symbol("at"):
                         try:
@@ -656,22 +656,18 @@ def normalize_expr_for_project(expr, project_version: int):
         return max_x
 
     # --------------------------------------------------------------------------
-    # Fix property layout
+    # Fix property layout and hiding
     # --------------------------------------------------------------------------
-    def fix_property_layout_recursive(node, rightmost_x=0, prop_index=[0]):
-        """
-        Recursively process every (property ...) block:
-        - Keep Reference/Value visible and untouched.
-        - Place hidden properties right of rightmost pin + margin, spaced vertically.
-        - Left-align all hidden properties.
-        """
+    def fix_property_layout_recursive(node, rightmost_x=0, prop_index=[0], for_kicad8=False):
+        """Adjust all (property …) blocks except Reference/Value."""
         if not isinstance(node, list):
             return node
 
         if len(node) > 0 and node[0] == Symbol("property"):
             name = str(node[1]).strip('"') if len(node) > 1 else ""
+
             if name not in ("Reference", "Value"):
-                # remove old (at ...), (hide ...), and (effects ...) blocks
+                # Remove old (at …), (hide …), (effects …)
                 node[:] = [
                     x
                     for x in node
@@ -682,41 +678,48 @@ def normalize_expr_for_project(expr, project_version: int):
                     )
                 ]
 
-                # Compute new coordinates
+                # Compute position offsets
                 x_offset = rightmost_x + HIDDEN_OFFSET_MARGIN_X
                 y_offset = HIDDEN_OFFSET_STEP_Y * prop_index[0]
-
-                node.append([Symbol("at"), x_offset, y_offset, HIDDEN_ROT])
-                node.append([
-                    Symbol("effects"),
-                    [Symbol("justify"), Symbol("left")]
-                ])
-                node.append([Symbol("hide"), Symbol("yes")])
                 prop_index[0] += 1
 
-        # Recurse into child lists
+                # Unified effects block per version
+                if for_kicad8:
+                    node.append([
+                        Symbol("effects"),
+                        [Symbol("justify"), Symbol("left")],
+                        [Symbol("hide")],
+                    ])
+                else:
+                    node.append([
+                        Symbol("effects"),
+                        [Symbol("justify"), Symbol("left")],
+                    ])
+                    node.append([Symbol("hide"), Symbol("yes")])
+
+                node.append([Symbol("at"), x_offset, y_offset, HIDDEN_ROT])
+
+        # Recurse through children
         for i, sub in enumerate(node):
             if isinstance(sub, list):
-                node[i] = fix_property_layout_recursive(sub, rightmost_x, prop_index)
-
+                node[i] = fix_property_layout_recursive(sub, rightmost_x, prop_index, for_kicad8)
         return node
 
     # --------------------------------------------------------------------------
-    # Main processing logic
+    # Main flow
     # --------------------------------------------------------------------------
     if project_version < 20240115:  # KiCad 8 mode
         expr = deep_strip(expr)
         expr = strip_hide_flags(expr)
         expr = ensure_pin_headers(expr)
 
-        # For each symbol block → compute rightmost pin + reposition properties
         if isinstance(expr, list):
             for i, e in enumerate(expr):
                 if isinstance(e, list) and e and e[0] == Symbol("symbol"):
                     rightmost_x = get_rightmost_pin_x(e)
-                    expr[i] = fix_property_layout_recursive(e, rightmost_x, prop_index=[0])
+                    expr[i] = fix_property_layout_recursive(e, rightmost_x, prop_index=[0], for_kicad8=True)
 
-        # Force version tag
+        # Enforce version tag
         found = False
         for i, e in enumerate(expr):
             if isinstance(e, list) and e and e[0] == Symbol("version"):
@@ -738,15 +741,6 @@ def normalize_expr_for_project(expr, project_version: int):
             expr.insert(1, [Symbol("version"), 20240115])
 
     return expr
-
-
-
-
-
-
-
-
-
 
 
 def append_symbols_from_file(src_sym_file: Path, rename_assets=False):
