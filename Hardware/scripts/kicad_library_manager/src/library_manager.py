@@ -17,6 +17,240 @@ from sexpdata import loads, dumps, Symbol
 
 # ---------------------------
 
+from uuid import uuid4
+
+KICAD8_SCHEMA = 20221018
+KICAD9_SCHEMA = 20240115
+
+def _find_symbol_uuid_block(sym_node):
+    """Return index of (uuid "...") inside this symbol node, or -1 if not present."""
+    for idx, child in enumerate(sym_node):
+        if isinstance(child, list) and child and str(child[0]) == "uuid":
+            return idx
+    return -1
+
+def _strip_children_by_head(sym_node, banned_heads: set[str]):
+    """Return a copy of sym_node with any direct child whose head is in banned_heads removed."""
+    cleaned = []
+    for child in sym_node:
+        if isinstance(child, list) and child:
+            head = str(child[0])
+            if head in banned_heads:
+                continue
+        cleaned.append(child)
+    return cleaned
+
+def detect_project_version(start_path: Path) -> int:
+    """
+    Detect the KiCad project version (schema number) by searching upward for project files.
+
+    Priority:
+    1. Read (generator_version "X.Y") from the nearest .kicad_sch
+    2. Fallback to (version XXXXX) field from .kicad_pro or .kicad_pcb
+    3. Default → KiCad 8 schema (20221018)
+    """
+    from sexpdata import loads, Symbol
+
+    def major_to_schema(ver_str: str) -> int:
+        """Map generator_version major to KiCad schema number."""
+        try:
+            major = int(ver_str.split(".")[0])
+        except Exception:
+            return 20221018
+        return 20240115 if major >= 9 else 20221018
+
+    # 1️⃣ Try schematic for generator_version
+    sch_file = find_upward("*.kicad_sch", start_path)
+    if sch_file and sch_file.exists():
+        try:
+            with open(sch_file, encoding="utf-8") as f:
+                sch_data = loads(f.read())
+            for node in sch_data:
+                if (
+                    isinstance(node, list)
+                    and len(node) >= 2
+                    and (node[0] == Symbol("generator_version") or node[0] == "generator_version")
+                ):
+                    ver = str(node[1]).strip('"')
+                    schema = major_to_schema(ver)
+                    print(f"[DEBUG] Detected generator_version {ver} → schema {schema}")
+                    return schema
+        except Exception as e:
+            print(f"[WARN] Failed to parse {sch_file.name} for generator_version: {e}")
+
+    # 2️⃣ Try .kicad_pro or .kicad_pcb
+    for pattern in ["*.kicad_pro", "*.kicad_pcb"]:
+        proj_file = find_upward(pattern, start_path)
+        if proj_file and proj_file.exists():
+            try:
+                with open(proj_file, encoding="utf-8") as f:
+                    proj_data = loads(f.read())
+                for node in proj_data:
+                    if (
+                        isinstance(node, list)
+                        and len(node) >= 2
+                        and (node[0] == Symbol("version") or node[0] == "version")
+                    ):
+                        ver_val = int(node[1])
+                        print(f"[DEBUG] Detected version {ver_val} from {proj_file.name}")
+                        return ver_val
+            except Exception as e:
+                print(f"[WARN] Failed to parse {proj_file.name} for version: {e}")
+
+    # 3️⃣ Default fallback
+    print("[WARN] Could not detect KiCad version; defaulting to KiCad 8 (20221018).")
+    return 20221018
+
+
+def convert_symbol_expr(sym_node, src_schema: int, dst_schema: int):
+    """
+    Convert a single (symbol "NAME" ...) node between KiCad 8 <-> 9 without touching geometry.
+    Assumes sym_node is exactly the list that starts with 'symbol'.
+
+    Rules:
+    - 8 -> 9:
+        drop pin_names/pin_numbers
+        insert uuid after symbol name if missing
+    - 9 -> 8:
+        drop uuid
+        keep everything else
+    - same -> passthrough
+    """
+    if not (isinstance(sym_node, list) and len(sym_node) >= 2 and str(sym_node[0]) == "symbol"):
+        return sym_node  # not a symbol? return as-is
+
+    # clone to avoid mutating caller's list
+    out = [c for c in sym_node]
+
+    if src_schema == dst_schema:
+        return out
+
+    # upgrading: KiCad 8 -> KiCad 9
+    if src_schema < KICAD9_SCHEMA and dst_schema >= KICAD9_SCHEMA:
+        # 1. remove pin_names / pin_numbers
+        out = _strip_children_by_head(out, {"pin_names", "pin_numbers"})
+
+        # 2. ensure uuid exists immediately after symbol name
+        # expected structure: [ "symbol", "NAME", (uuid "..."), (in_bom ...), ... ]
+        # so index 0 = "symbol", index 1 = "NAME"
+        uuid_idx = _find_symbol_uuid_block(out)
+        if uuid_idx == -1:
+            if len(out) >= 2:
+                out.insert(2, [Symbol("uuid"), str(uuid4())])
+            else:
+                # degenerate / malformed symbol, just append
+                out.append([Symbol("uuid"), str(uuid4())])
+
+        return out
+
+    # downgrading: KiCad 9 -> KiCad 8
+    if src_schema >= KICAD9_SCHEMA and dst_schema < KICAD9_SCHEMA:
+        # remove uuid (but ONLY at top level of the symbol, do not recurse)
+        out = _strip_children_by_head(out, {"uuid"})
+        # we do NOT add pin_names/pin_numbers back; KiCad 8 will still parse.
+        return out
+
+    # fallback (shouldn't happen, but safe)
+    return out
+
+def detect_schema_from_sexp(root_sexp: list) -> int:
+    """Look for (version XXXXX) at top level of a .kicad_sym file."""
+    if isinstance(root_sexp, list):
+        for node in root_sexp:
+            if isinstance(node, list) and node and str(node[0]) == "version":
+                try:
+                    return int(node[1])
+                except Exception:
+                    pass
+    # Default assume KiCad 8 if not found
+    return KICAD8_SCHEMA
+
+def convert_symbol_file_sexp(root_sexp: list, dst_schema: int) -> list:
+    """
+    Convert a parsed .kicad_sym S-expression tree to the target KiCad schema (8 ↔ 9).
+    Recursively removes or inserts version-specific tags and rewrites (version …).
+    """
+    if not isinstance(root_sexp, list):
+        return root_sexp
+
+    src_schema = detect_schema_from_sexp(root_sexp)
+
+    # --- 1. Convert all (symbol …) blocks recursively ---
+    new_root = []
+    for node in root_sexp:
+        if isinstance(node, list) and node and str(node[0]) == "symbol":
+            new_root.append(_convert_symbol_recursive(node, src_schema, dst_schema))
+        else:
+            new_root.append(node)
+
+    # --- 2. Ensure a correct (version …) header exists ---
+    fixed = []
+    has_version = False
+    for node in new_root:
+        if isinstance(node, list) and node and str(node[0]) == "version":
+            fixed.append([Symbol("version"), dst_schema])
+            has_version = True
+        else:
+            fixed.append(node)
+    if not has_version:
+        fixed.insert(1, [Symbol("version"), dst_schema])
+
+    # --- 3. Downgrade cleanup for KiCad 8 ---
+    if dst_schema < KICAD9_SCHEMA:
+        banned = {"uuid", "extends", "lib_id", "template", "style", "parent"}
+
+        def deep_clean(node):
+            """Recursively strip banned KiCad-9 fields from nested lists."""
+            if not isinstance(node, list):
+                return node
+            if not node:
+                return node
+            head = str(node[0])
+            if head in banned:
+                return None
+            cleaned = []
+            for child in node:
+                sub = deep_clean(child)
+                if sub is not None:
+                    cleaned.append(sub)
+            return cleaned
+
+        cleaned_root = []
+        for n in fixed:
+            c = deep_clean(n)
+            if c is not None:
+                cleaned_root.append(c)
+        fixed = cleaned_root
+
+    return fixed
+
+
+def _convert_symbol_recursive(sym_node, src_schema, dst_schema):
+    """
+    Convert one (symbol ...) block and all nested (symbol ...) sub-blocks.
+    ex:
+    (symbol "IR4302"
+        ...
+        (symbol "IR4302_1_1"
+        ...
+        )
+    )
+    """
+    # first convert this symbol itself:
+    converted_top = convert_symbol_expr(sym_node, src_schema, dst_schema)
+
+    # now walk its children and also convert any nested (symbol ...)
+    out_children = []
+    for child in converted_top:
+        if isinstance(child, list) and child and str(child[0]) == "symbol":
+            out_children.append(_convert_symbol_recursive(child, src_schema, dst_schema))
+        else:
+            out_children.append(child)
+
+    return out_children
+
+
+
 def find_upward(target: str, start_path: Path) -> Path | None:
     """
     Search upward from start_path to find either:
@@ -259,19 +493,272 @@ def rename_extracted_assets(tempdir: Path, footprint_map: dict):
 
     return renamed_count
 
-def append_symbols_from_file(
-    src_sym_file: Path, rename_assets=False
-):  # <-- RENAME FLAG ADDED
+def ensure_project_symbol_header(project_sym_path: Path, project_version: int):
+    """
+    Ensure the ProjectSymbols.kicad_sym file has a valid (version ...) and (generator ...) header
+    matching the detected KiCad project version.
+
+    It safely replaces or inserts the header tags without touching symbols.
+    """
+    from sexpdata import loads, dumps, Symbol
+
+    if not project_sym_path.exists():
+        return
+
+    try:
+        with open(project_sym_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        sexpr = loads(content)
+    except Exception as e:
+        print(f"[WARN] Failed to parse {project_sym_path.name} for header update: {e}")
+        return
+
+    if not isinstance(sexpr, list) or len(sexpr) == 0:
+        return
+
+    # Select the correct schema number
+    target_schema = 20240115 if project_version >= 20240115 else 20221018
+
+    # Remove old (version ...) and (generator ...) lines if they exist
+    sexpr = [
+        x
+        for x in sexpr
+        if not (
+            isinstance(x, list)
+            and len(x) > 0
+            and str(x[0]) in ("version", "generator", "generator_version")
+        )
+    ]
+
+    # Insert new header fields after the root symbol list marker
+    sexpr.insert(1, [Symbol("version"), target_schema])
+    sexpr.insert(2, [Symbol("generator"), "CSE-Manager"])
+    if target_schema >= 20240115:
+        sexpr.insert(3, [Symbol("generator_version"), "9.0"])
+    else:
+        sexpr.insert(3, [Symbol("generator_version"), "8.0"])
+
+    # Rewrite file
+    try:
+        with open(project_sym_path, "w", encoding="utf-8") as f:
+            f.write(
+                dumps(
+                    sexpr,
+                    wrap=Symbol("kicad_symbol_lib"),
+                    pretty_print=True,
+                )
+            )
+        print(f"[INFO] Updated header in {project_sym_path.name} → schema {target_schema}")
+    except Exception as e:
+        print(f"[WARN] Could not write updated header for {project_sym_path.name}: {e}")
+
+
+def normalize_expr_for_project(expr, project_version: int):
+    """
+    Cleans and adjusts KiCad S-expressions for compatibility between KiCad 8 and 9.
+    - KiCad 8: Removes unsupported tags, hides and repositions properties neatly to the right
+               of the rightmost pin, spaced vertically, left-aligned.
+    - KiCad 9: Ensures missing UUIDs exist.
+    """
+    from sexpdata import Symbol
+    from uuid import uuid4
+
+    HIDDEN_OFFSET_MARGIN_X = 20  # mm extra spacing to the right of rightmost pin
+    HIDDEN_OFFSET_STEP_Y = -2    # vertical spacing between properties
+    HIDDEN_ROT = 0
+
+    # --------------------------------------------------------------------------
+    # Utility functions
+    # --------------------------------------------------------------------------
+
+    def deep_strip(e):
+        """Remove KiCad 9-only constructs that KiCad 8 can't parse."""
+        banned = {
+            Symbol("uuid"), Symbol("extends"), Symbol("template"),
+            Symbol("lib_id"), Symbol("style"), Symbol("parent"),
+            Symbol("embedded_fonts"), Symbol("text_styles"),
+        }
+        if not isinstance(e, list):
+            return e
+        if e and e[0] in banned:
+            return None
+        cleaned = []
+        for sub in e:
+            sub_clean = deep_strip(sub)
+            if sub_clean is not None:
+                cleaned.append(sub_clean)
+        return cleaned
+
+    def strip_hide_flags(e):
+        """Remove invalid or misplaced (hide yes) tags before re-adding them."""
+        if not isinstance(e, list):
+            return e
+        cleaned = []
+        for sub in e:
+            if isinstance(sub, list):
+                if len(sub) == 2 and str(sub[0]) == "hide" and str(sub[1]) == "yes":
+                    continue
+                sub = strip_hide_flags(sub)
+                if sub is not None:
+                    cleaned.append(sub)
+            else:
+                cleaned.append(sub)
+        return cleaned
+
+    def add_uuids(e):
+        """Ensure all (symbol ...) blocks have UUIDs for KiCad 9."""
+        if isinstance(e, list):
+            newnode = [add_uuids(x) for x in e]
+            if e and e[0] == Symbol("symbol") and not any(
+                isinstance(i, list) and i and i[0] == Symbol("uuid") for i in e
+            ):
+                newnode.insert(2, [Symbol("uuid"), str(uuid4())])
+            return newnode
+        return e
+
+    def ensure_pin_headers(sym):
+        """Add missing (pin_names)/(pin_numbers) for KiCad 8 compatibility."""
+        if not (isinstance(sym, list) and sym and sym[0] == Symbol("symbol")):
+            return sym
+
+        has_pin_names = any(isinstance(i, list) and i and i[0] == Symbol("pin_names") for i in sym)
+        has_pin_numbers = any(isinstance(i, list) and i and i[0] == Symbol("pin_numbers") for i in sym)
+
+        insert_pos = 2 if len(sym) > 2 else len(sym)
+        if not has_pin_numbers:
+            sym.insert(insert_pos, [Symbol("pin_numbers"), Symbol("hide")])
+            insert_pos += 1
+        if not has_pin_names:
+            sym.insert(insert_pos, [Symbol("pin_names"), [Symbol("offset"), 0], Symbol("hide")])
+
+        for i, sub in enumerate(sym):
+            if isinstance(sub, list) and sub and sub[0] == Symbol("symbol"):
+                sym[i] = ensure_pin_headers(sub)
+        return sym
+
+    # --------------------------------------------------------------------------
+    # Find rightmost pin X coordinate
+    # --------------------------------------------------------------------------
+    def get_rightmost_pin_x(symbol_node):
+        """Scan all (pin ...) elements and return the maximum X coordinate."""
+        max_x = 0
+        for child in symbol_node:
+            if isinstance(child, list) and len(child) > 0 and child[0] == Symbol("pin"):
+                # find (at x y rot)
+                for elem in child:
+                    if isinstance(elem, list) and elem and elem[0] == Symbol("at"):
+                        try:
+                            x = float(elem[1])
+                            if x > max_x:
+                                max_x = x
+                        except Exception:
+                            pass
+        return max_x
+
+    # --------------------------------------------------------------------------
+    # Fix property layout
+    # --------------------------------------------------------------------------
+    def fix_property_layout_recursive(node, rightmost_x=0, prop_index=[0]):
+        """
+        Recursively process every (property ...) block:
+        - Keep Reference/Value visible and untouched.
+        - Place hidden properties right of rightmost pin + margin, spaced vertically.
+        - Left-align all hidden properties.
+        """
+        if not isinstance(node, list):
+            return node
+
+        if len(node) > 0 and node[0] == Symbol("property"):
+            name = str(node[1]).strip('"') if len(node) > 1 else ""
+            if name not in ("Reference", "Value"):
+                # remove old (at ...), (hide ...), and (effects ...) blocks
+                node[:] = [
+                    x
+                    for x in node
+                    if not (
+                        isinstance(x, list)
+                        and x
+                        and x[0] in (Symbol("at"), Symbol("hide"), Symbol("effects"))
+                    )
+                ]
+
+                # Compute new coordinates
+                x_offset = rightmost_x + HIDDEN_OFFSET_MARGIN_X
+                y_offset = HIDDEN_OFFSET_STEP_Y * prop_index[0]
+
+                node.append([Symbol("at"), x_offset, y_offset, HIDDEN_ROT])
+                node.append([
+                    Symbol("effects"),
+                    [Symbol("justify"), Symbol("left")]
+                ])
+                node.append([Symbol("hide"), Symbol("yes")])
+                prop_index[0] += 1
+
+        # Recurse into child lists
+        for i, sub in enumerate(node):
+            if isinstance(sub, list):
+                node[i] = fix_property_layout_recursive(sub, rightmost_x, prop_index)
+
+        return node
+
+    # --------------------------------------------------------------------------
+    # Main processing logic
+    # --------------------------------------------------------------------------
+    if project_version < 20240115:  # KiCad 8 mode
+        expr = deep_strip(expr)
+        expr = strip_hide_flags(expr)
+        expr = ensure_pin_headers(expr)
+
+        # For each symbol block → compute rightmost pin + reposition properties
+        if isinstance(expr, list):
+            for i, e in enumerate(expr):
+                if isinstance(e, list) and e and e[0] == Symbol("symbol"):
+                    rightmost_x = get_rightmost_pin_x(e)
+                    expr[i] = fix_property_layout_recursive(e, rightmost_x, prop_index=[0])
+
+        # Force version tag
+        found = False
+        for i, e in enumerate(expr):
+            if isinstance(e, list) and e and e[0] == Symbol("version"):
+                expr[i][1] = 20221018
+                found = True
+                break
+        if not found:
+            expr.insert(1, [Symbol("version"), 20221018])
+
+    else:  # KiCad 9 mode
+        expr = add_uuids(expr)
+        found = False
+        for i, e in enumerate(expr):
+            if isinstance(e, list) and e and e[0] == Symbol("version"):
+                expr[i][1] = 20240115
+                found = True
+                break
+        if not found:
+            expr.insert(1, [Symbol("version"), 20240115])
+
+    return expr
+
+
+
+
+
+
+
+
+
+
+
+def append_symbols_from_file(src_sym_file: Path, rename_assets=False):
     """
     Appends symbols from a source KiCad library file to the project library.
-    It localizes the footprint link (to the project library) and builds a map linking
-    Footprint names to their main Symbol names (stored in TEMP_MAP_FILE).
-    If rename_assets is True, the footprint link in the symbol is set to the Symbol Name.
+    Automatically detects and converts between KiCad 8 and 9 symbol formats.
+    Ensures correct top-level wrapping and header for KiCad compatibility.
     """
 
     existing_main_symbols = get_existing_main_symbols()
 
-    # Load existing map or start fresh
+    # Load or initialize the footprint map
     footprint_map = {}
     if TEMP_MAP_FILE.exists():
         with open(TEMP_MAP_FILE, "r") as f:
@@ -281,116 +768,117 @@ def append_symbols_from_file(
         with open(src_sym_file, "r", encoding="utf-8") as f:
             src_content = f.read()
             src_sexp = loads(src_content)
+
+        # --- Detect project KiCad version (schema) ---
+        project_version = detect_project_version(PROJECT_DIR)
+
+        # --- Normalize and clean symbols for target KiCad version ---
+        src_sexp = normalize_expr_for_project(src_sexp, project_version)
+        print(f"[INFO] Cleaned {src_sym_file.name} for KiCad schema {project_version}")
+
     except FileNotFoundError:
-        print(f"ERROR: Source file not found: {src_sym_file.name}")
+        print(f"[ERROR] Source file not found: {src_sym_file.name}")
         return False
     except Exception as e:
-        print(f"ERROR parsing source S-expression file {src_sym_file.name}: {e}")
+        print(f"[ERROR] Parsing S-expression in {src_sym_file.name}: {e}")
         return False
 
+    # --- Collect symbols to append ---
     symbols_to_append_sexp = []
     appended_any = False
 
-    # Iterate over the symbol blocks (skipping the main tag)
     for element in src_sexp[1:]:
         if (
             isinstance(element, list)
             and len(element) > 1
             and (element[0] == "symbol" or element[0] == Symbol("symbol"))
         ):
-
             symbol_name = str(element[1])
             base_name = SUB_PART_PATTERN.sub("", symbol_name)
 
             if base_name not in existing_main_symbols:
-
-                # --- Localization and Mapping ---
+                # --- Handle footprint localization ---
                 raw_footprint_name = None
 
-                # Find the older 'Footprint' property
+                # (property "Footprint" "LIB:NAME")
                 prop_element = find_sexp_property(element, "Footprint")
                 if prop_element:
                     raw_footprint_name = str(prop_element[2]).split(":")[-1]
+                    fp_name_for_link = base_name if rename_assets else raw_footprint_name
+                    prop_element[2] = f"{PROJECT_FOOTPRINT_LIB_NAME}:{fp_name_for_link}"
 
-                    # MODIFIED: Use symbol name for the new FP link if renaming is active
-                    fp_name_for_link = (
-                        base_name if rename_assets else raw_footprint_name
-                    )
-                    new_fp_value = f"{PROJECT_FOOTPRINT_LIB_NAME}:{fp_name_for_link}"
-                    prop_element[2] = new_fp_value
-
-                # Find the newer 'footprint' definition list
+                # (footprint "LIB:NAME")
                 footprint_element = find_sexp_element(element, "footprint")
                 if footprint_element and len(footprint_element) > 1:
                     fp_value = str(footprint_element[1])
                     name_only = fp_value.split(":")[-1]
-
-                    # MODIFIED: Use symbol name for the new FP link if renaming is active
                     fp_name_for_link = base_name if rename_assets else name_only
-                    footprint_element[1] = (
-                        f"{PROJECT_FOOTPRINT_LIB_NAME}:{fp_name_for_link}"
-                    )
-
+                    footprint_element[1] = f"{PROJECT_FOOTPRINT_LIB_NAME}:{fp_name_for_link}"
                     if not raw_footprint_name:
                         raw_footprint_name = name_only
 
+                # Map footprint to symbol for renaming
                 if raw_footprint_name:
-                    # Map the original footprint name to its main symbol name for asset renaming later
                     footprint_map[raw_footprint_name] = base_name
 
                 symbols_to_append_sexp.append(element)
-
-                if symbol_name == base_name:
-                    existing_main_symbols.add(symbol_name)
-
+                existing_main_symbols.add(base_name)
                 appended_any = True
-                print(f"Appended symbol: {symbol_name} (Footprint link localized)")
+                print(f"[OK] Appended symbol: {symbol_name}")
             else:
-                pass  # Symbol already exists
+                print(f"[SKIP] Symbol already exists: {symbol_name}")
 
-    # Save the updated map to disk
+    # --- Save footprint-symbol map ---
     if appended_any:
         with open(TEMP_MAP_FILE, "w") as f:
             json.dump(footprint_map, f, indent=4)
 
-    if symbols_to_append_sexp:
-        project_sym_path = PROJECT_SYMBOL_LIB
-        new_file_content = None
+    project_sym_path = PROJECT_SYMBOL_LIB
+    new_file_content = None
 
-        # Logic to append symbols to the project file (omitted for brevity, assume correct)
-        # ... (Same logic as provided in previous snippets) ...
+    # --- If the project file already exists, append ---
+    if project_sym_path.exists():
+        try:
+            with open(project_sym_path, "r", encoding="utf-8") as f:
+                project_content = f.read()
+            project_sexp = loads(project_content)
 
-        # Read the existing project library file
-        if project_sym_path.exists():
-            try:
-                with open(project_sym_path, "r", encoding="utf-8") as f:
-                    project_content = f.read()
-                project_sexp = loads(project_content)
-                project_sexp.extend(symbols_to_append_sexp)
-                new_file_content = dumps(project_sexp, pretty_print=True)
-            except Exception as e:
-                print(
-                    f"ERROR modifying project library using S-expression parser: {e}. Recreating file."
-                )
-                project_sym_path.unlink(missing_ok=True)
-                new_file_content = None
+            # Ensure it's wrapped in (kicad_symbol_lib ...)
+            if not (isinstance(project_sexp, list) and len(project_sexp) > 0 and str(project_sexp[0]) == "kicad_symbol_lib"):
+                project_sexp = [Symbol("kicad_symbol_lib")] + project_sexp
 
-        if not project_sym_path.exists() or new_file_content is None:
-            # Creation of the very first file
-            header = [["version", 20211026], ["generator", "script-generator"]]
-            full_sexp = header + symbols_to_append_sexp
-            new_file_content = dumps(
-                full_sexp, wrap=Symbol("kicad_symbol_lib"), pretty_print=True
-            )
+            project_sexp.extend(symbols_to_append_sexp)
+            new_file_content = dumps(project_sexp, pretty_print=True, wrap=Symbol("kicad_symbol_lib"))
+        except Exception as e:
+            print(f"[WARN] Error modifying project library: {e}. Recreating file.")
+            project_sym_path.unlink(missing_ok=True)
+            new_file_content = None
 
-        if new_file_content:
-            with open(project_sym_path, "w", encoding="utf-8") as f:
-                f.write(new_file_content)
+    # --- If file doesn't exist or recreation needed ---
+    if not project_sym_path.exists() or new_file_content is None:
+        target_schema = 20240115 if project_version >= 20240115 else 20221018
+        generator_version = "9.0" if target_schema >= 20240115 else "8.0"
+        header = [
+            ["version", target_schema],
+            ["generator", "CSE-Manager"],
+            ["generator_version", generator_version],
+        ]
+        full_sexp = header + symbols_to_append_sexp
+        new_file_content = dumps(full_sexp, wrap=Symbol("kicad_symbol_lib"), pretty_print=True)
+
+    # --- Write back the file ---
+    if new_file_content:
+        with open(project_sym_path, "w", encoding="utf-8") as f:
+            f.write(new_file_content)
+
+        # Ensure header correctness
+        ensure_project_symbol_header(project_sym_path, project_version)
 
     if not appended_any:
-        print(f"No new symbols to append from {src_sym_file.name}")
+        print(f"[WARN] No new symbols added from {src_sym_file.name}")
 
     return appended_any
+
 
 def process_zip(zip_file, rename_assets=False):
     """
