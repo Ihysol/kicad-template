@@ -389,52 +389,36 @@ def get_existing_main_symbols():
     """Wrapper to get the set of main symbols currently in the project library for quick lookup."""
     return set(list_symbols_simple(PROJECT_SYMBOL_LIB, print_list=False))
 
-def localize_3d_model_path(mod_file: Path, footprint_map: dict):
+def localize_3d_model_path(mod_file: Path, footprint_map: dict, mod_text: str | None = None) -> str | None:
     """
-    Reads a .kicad_mod (footprint) file, uses the footprint_map to find the associated main symbol name,
-    and replaces the 3D model path to use the ${KIPRJMOD} variable and the symbol name.
-    Returns the modified content string or None on error or if no model tag is found.
+    Localize 3D model paths directly within already-converted text.
+    If mod_text is provided, modifies it in place — no re-read.
     """
+    from sexpdata import loads, dumps, Symbol
 
     footprint_name = mod_file.stem
-    # Use the footprint name (which might be the symbol name if renaming occurred) to get the symbol name
-    symbol_name = footprint_map.get(footprint_name)
-
-    if not symbol_name:
-        return None
+    symbol_name = footprint_map.get(footprint_name, footprint_name)
 
     try:
-        with open(mod_file, "r", encoding="utf-8") as f:
-            content = f.read()
-        mod_sexp = loads(content)
+        if mod_text is None:
+            with open(mod_file, "r", encoding="utf-8") as f:
+                mod_text = f.read()
+        mod_sexp = loads(mod_text)
     except Exception as e:
-        print(f"Error reading or parsing {mod_file.name}: {e}")
-        return None
-
-    model_elements = [
-        e
-        for e in mod_sexp
-        if isinstance(e, list)
-        and len(e) > 0
-        and (e[0] == "model" or e[0] == Symbol("model"))
-    ]
+        print(f"[WARN] Could not parse {mod_file.name} for 3D localization: {e}")
+        return mod_text
 
     modified = False
+    for idx, elem in enumerate(mod_sexp):
+        if isinstance(elem, list) and elem and str(elem[0]) == "model":
+            new_path = f"${{KIPRJMOD}}/3dmodels/{symbol_name}.stp"
+            if len(elem) > 1:
+                mod_sexp[idx][1] = new_path
+                modified = True
 
-    for model_element in model_elements:
-        if len(model_element) > 1:
-            # The new 3D model path uses the symbol name
-            model_filename = symbol_name + ".stp"
-            target_path = f"${{KIPRJMOD}}/3dmodels/{model_filename}"
+    return dumps(mod_sexp, pretty_print=True, wrap=None) if modified else mod_text
 
-            # Overwrite the path in the S-expression list
-            model_element[1] = target_path
-            modified = True
 
-    if modified:
-        return dumps(mod_sexp, pretty_print=True)
-
-    return None
 
 def rename_extracted_assets(tempdir: Path, footprint_map: dict):
     """
@@ -552,6 +536,214 @@ def ensure_project_symbol_header(project_sym_path: Path, project_version: int):
     except Exception as e:
         print(f"[WARN] Could not write updated header for {project_sym_path.name}: {e}")
 
+def force_footprint_version(mod_text: str, dst_schema: int) -> str:
+    """
+    Force-converts a .kicad_mod file between KiCad 8 and 9 formats.
+
+    - Downgrade (9→8): replaces (kicad_mod ...) → (module "<name>" ...)
+      Removes KiCad 9-only constructs such as uuid, embedded_fonts, etc.
+      Sets version 20221018.
+    - Upgrade (8→9): replaces (module "<name>") → (kicad_mod ...)
+      Adds uuid if missing and sets version 20241229.
+    """
+    from sexpdata import loads, dumps, Symbol
+    from uuid import uuid4
+
+    try:
+        sexp = loads(mod_text)
+    except Exception as e:
+        print(f"[WARN] Could not parse footprint: {e}")
+        return mod_text
+
+    # --------------------------------------------------------
+    # Helper functions
+    # --------------------------------------------------------
+
+    def downgrade_to_v8(node):
+        """Recursively remove KiCad 9 fields not supported in v8."""
+        banned = {
+            # meta / header
+            "uuid", "tstamp", "locked", "text_styles", "embedded_fonts", "font",
+            "model_uuid", "layerselection", "constraint", "outline_anchor",
+            # layout / rules
+            "keepout", "zone_connect", "solder_paste_ratio",
+            "thermal_bridge_angle", "solder_mask_ratio",
+        }
+
+        if isinstance(node, list):
+            head = str(node[0])
+            if head in banned:
+                return None
+            cleaned = []
+            for sub in node:
+                sub_clean = downgrade_to_v8(sub)
+                if sub_clean is not None:
+                    cleaned.append(sub_clean)
+            return cleaned
+        return node
+
+    def upgrade_to_v9(node):
+        """Add UUID if missing."""
+        if not isinstance(node, list):
+            return node
+        newnode = [upgrade_to_v9(x) for x in node]
+        if node and str(node[0]) == "module" and not any(
+            isinstance(i, list) and i and i[0] == Symbol("uuid") for i in node
+        ):
+            newnode.insert(2, [Symbol("uuid"), str(uuid4())])
+        return newnode
+
+    # --------------------------------------------------------
+    # Main conversion logic
+    # --------------------------------------------------------
+
+    if dst_schema < 20240115:
+        # --- Downgrade KiCad 9 → KiCad 8 ---
+        name = "Unnamed_Footprint"
+        if isinstance(sexp, list) and len(sexp) > 1 and isinstance(sexp[1], str):
+            name = sexp[1]
+
+        # Replace root tag
+        sexp[0] = Symbol("module")
+        if len(sexp) < 2 or not isinstance(sexp[1], str):
+            sexp.insert(1, name)
+
+        # Replace version and clean up
+        sexp = downgrade_to_v8(sexp)
+
+        # Ensure version field present and correct
+        has_version = False
+        for sub in sexp:
+            if isinstance(sub, list) and str(sub[0]) == "version":
+                sub[1] = 20221018
+                has_version = True
+        if not has_version:
+            sexp.insert(1, [Symbol("version"), 20221018])
+
+        print(f"[INFO] Downgraded footprint '{name}' → KiCad 8 (20221018)")
+        return dumps(sexp, pretty_print=True, wrap=None)
+
+    else:
+        # --- Upgrade KiCad 8 → KiCad 9 ---
+        sexp = upgrade_to_v9(sexp)
+        sexp[0] = Symbol("kicad_mod")
+
+        # Update or insert version
+        has_version = False
+        for sub in sexp:
+            if isinstance(sub, list) and str(sub[0]) == "version":
+                sub[1] = 20241229
+                has_version = True
+        if not has_version:
+            sexp.insert(1, [Symbol("version"), 20241229])
+
+        print("[INFO] Upgraded footprint → KiCad 9 (20241229)")
+        return dumps(sexp, pretty_print=True, wrap=None)
+
+
+
+def convert_footprint_file(mod_text: str, dst_schema: int) -> str:
+    """
+    Converts a .kicad_mod/.kicad_mod-like (footprint) file between KiCad 8 and 9 formats.
+
+    - Downgrades (9→8): (footprint|kicad_mod → module <name>), sets version 20221018
+    - Upgrades (8→9): (module <name> → footprint "<name>"), sets version 20241229
+    """
+    from sexpdata import loads, dumps, Symbol
+    from uuid import uuid4
+
+    try:
+        sexp = loads(mod_text)
+    except Exception as e:
+        print(f"[WARN] Failed to parse footprint: {e}")
+        return mod_text
+
+    # --- helpers ---
+    def get_footprint_name(node):
+        """Extract footprint name for KiCad 8 header."""
+        if isinstance(node, list):
+            for el in node:
+                if isinstance(el, str):
+                    return el
+        return "Unnamed_Footprint"
+
+    def replace_root_tag(node, new_tag, name=None):
+        """Replace the root tag and handle name argument placement."""
+        if not isinstance(node, list) or not node:
+            return node
+        node[0] = Symbol(new_tag)
+        # KiCad 9 uses (footprint "<name>"), KiCad 8 uses (module <name>)
+        if new_tag == "module":
+            # KiCad 8: ensure unquoted name right after tag
+            if len(node) < 2 or not isinstance(node[1], str):
+                node.insert(1, name or "Unnamed_Footprint")
+            else:
+                # remove quotes around name if present
+                node[1] = node[1].replace('"', "")
+        elif new_tag in ("footprint", "kicad_mod"):
+            # KiCad 9: ensure quoted name
+            if len(node) < 2:
+                node.insert(1, f'"{name or "Unnamed_Footprint"}"')
+        return node
+
+    def replace_version_recursive(node, new_ver):
+        """Recursively replace or insert version."""
+        if not isinstance(node, list):
+            return
+        found = False
+        for i, sub in enumerate(node):
+            if isinstance(sub, list) and sub and str(sub[0]) == "version":
+                node[i][1] = new_ver
+                found = True
+            else:
+                replace_version_recursive(sub, new_ver)
+        if not found:
+            node.insert(1, [Symbol("version"), new_ver])
+
+    def downgrade(node):
+        """Remove KiCad 9-only fields."""
+        banned = {
+            "uuid", "tstamp", "model_uuid", "text_styles",
+            "layerselection", "constraint", "outline_anchor",
+            "locked", "keepout"
+        }
+        if isinstance(node, list):
+            head = str(node[0])
+            if head in banned:
+                return None
+            return [x for x in (downgrade(sub) for sub in node) if x is not None]
+        return node
+
+    def upgrade(node):
+        """Add UUID for KiCad 9."""
+        if not isinstance(node, list):
+            return node
+        newnode = [upgrade(x) for x in node]
+        if node and str(node[0]) in ("module",) and not any(
+            isinstance(i, list) and i and i[0] == Symbol("uuid") for i in node
+        ):
+            newnode.insert(2, [Symbol("uuid"), str(uuid4())])
+        return newnode
+
+    # --- determine current root ---
+    root_tag = str(sexp[0]) if isinstance(sexp, list) and sexp else ""
+    name = get_footprint_name(sexp)
+
+    # --- apply conversion ---
+    if dst_schema < 20240115:
+        # downgrade 9 → 8
+        sexp = replace_root_tag(sexp, "module", name)
+        replace_version_recursive(sexp, 20221018)
+        sexp = downgrade(sexp)
+        print(f"[INFO] Downgraded footprint → KiCad 8 (module {name})")
+    else:
+        # upgrade 8 → 9
+        sexp = replace_root_tag(sexp, "footprint", name)
+        replace_version_recursive(sexp, 20241229)
+        sexp = upgrade(sexp)
+        print(f"[INFO] Upgraded footprint → KiCad 9 (footprint {name})")
+
+    return dumps(sexp, wrap=None, pretty_print=True)
 
 def normalize_expr_for_project(expr, project_version: int):
     """
@@ -901,23 +1093,19 @@ def process_zip(zip_file, rename_assets=False):
         print(f"[FAIL] Error extracting ZIP file {zip_file.name}: {e}")
         return
 
-    # --- Detect KiCad + 3D folders automatically ---
+    # --- Detect KiCad + 3D folders ---
     all_dirs = [p for p in tempdir.rglob("*") if p.is_dir()]
-    kicad_root = None
-    model_root = None
+    kicad_root, model_root = None, None
 
-    # Find the first matching folders (case-insensitive)
     for d in all_dirs:
         if d.name.lower() == "kicad":
             kicad_root = d
         elif d.name.lower() == "3d":
             model_root = d
 
-    # If neither found, check if there's a single nested folder (like LIB_MyPart)
     if not kicad_root and not model_root:
         subfolders = [f for f in tempdir.iterdir() if f.is_dir()]
         if len(subfolders) == 1:
-            # Dive into that folder
             nested_root = subfolders[0]
             print(f"[DEBUG] Found nested folder: {nested_root.name}")
             for d in nested_root.rglob("*"):
@@ -926,7 +1114,6 @@ def process_zip(zip_file, rename_assets=False):
                 elif d.is_dir() and d.name.lower() == "3d":
                     model_root = d
 
-    # Fallbacks
     if not kicad_root:
         kicad_root = tempdir
         print("[WARN] KiCad folder not found, using temp root.")
@@ -974,20 +1161,48 @@ def process_zip(zip_file, rename_assets=False):
         print(f"[INFO] Renamed {rename_count} assets.")
 
     # --- Step 4: Import footprints ---
+    project_version = detect_project_version(PROJECT_DIR)
+    dst_schema = 20221018 if project_version < 20240115 else 20241229
+    print(f"[DEBUG] Target project schema for footprints: {dst_schema}")
+
     for mod_file in kicad_root.rglob("*.kicad_mod"):
         dest = PROJECT_FOOTPRINT_LIB / mod_file.name
         if dest.exists():
             print(f'[WARN] Skipped footprint "{mod_file.name}": already exists.')
             continue
 
-        modified = localize_3d_model_path(mod_file, footprint_map)
-        if modified:
+        try:
+            with open(mod_file, "r", encoding="utf-8") as f:
+                mod_text = f.read()
+
+            # --- Detect source schema ---
+            src_schema = 20221018
+            match = re.search(r"\(version\s+(\d+)\)", mod_text)
+            if match:
+                try:
+                    src_schema = int(match.group(1))
+                except ValueError:
+                    pass
+
+            print(f"[DEBUG] Converting {mod_file.name}: {src_schema} → {dst_schema}")
+
+            # --- Convert if version differs ---
+            if src_schema != dst_schema:
+                mod_text = force_footprint_version(mod_text, dst_schema)
+            else:
+                print(f"[INFO] {mod_file.name} already matches target schema.")
+
+            # --- Apply 3D model localization on the same converted text ---
+            mod_text = localize_3d_model_path(mod_file, footprint_map, mod_text)
+
+            # --- Write result ---
             with open(dest, "w", encoding="utf-8") as f:
-                f.write(modified)
-            print(f'[OK] Added footprint "{mod_file.name}" with localized 3D path.')
-        else:
-            shutil.copy(mod_file, dest)
-            print(f'[OK] Added footprint "{mod_file.name}" (no localization).')
+                f.write(mod_text)
+
+            print(f'[OK] Added footprint "{mod_file.name}" (KiCad {"8" if dst_schema < 20240115 else "9"} schema).')
+
+        except Exception as e:
+            print(f"[FAIL] Error processing footprint {mod_file.name}: {e}")
 
     # --- Step 5: Import 3D models ---
     copied_3d_count = 0
@@ -996,7 +1211,6 @@ def process_zip(zip_file, rename_assets=False):
         if dest_file.exists():
             print(f'[WARN] Skipped 3D model "{stp_file.name}" (already exists).')
             continue
-
         try:
             shutil.copy(stp_file, dest_file)
             copied_3d_count += 1
@@ -1013,6 +1227,7 @@ def process_zip(zip_file, rename_assets=False):
         TEMP_MAP_FILE.unlink()
 
     print(f"[OK] Finished importing {zip_file.name}")
+
 
 def purge_zip_contents(zip_path: Path):
     """
