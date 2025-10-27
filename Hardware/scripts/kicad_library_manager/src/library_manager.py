@@ -56,8 +56,8 @@ def detect_project_version(start_path: Path) -> int:
         try:
             major = int(ver_str.split(".")[0])
         except Exception:
-            return 20221018
-        return 20240115 if major >= 9 else 20221018
+            return KICAD8_SCHEMA
+        return KICAD9_SCHEMA if major >= 9 else KICAD8_SCHEMA
 
     # 1️⃣ Try schematic for generator_version
     sch_file = find_upward("*.kicad_sch", start_path)
@@ -99,7 +99,7 @@ def detect_project_version(start_path: Path) -> int:
 
     # 3️⃣ Default fallback
     print("[WARN] Could not detect KiCad version; defaulting to KiCad 8 (20221018).")
-    return 20221018
+    return KICAD8_SCHEMA
 
 
 def convert_symbol_expr(sym_node, src_schema: int, dst_schema: int):
@@ -501,7 +501,7 @@ def ensure_project_symbol_header(project_sym_path: Path, project_version: int):
         return
 
     # Select the correct schema number
-    target_schema = 20240115 if project_version >= 20240115 else 20221018
+    target_schema = KICAD9_SCHEMA if project_version >= KICAD9_SCHEMA else KICAD8_SCHEMA
 
     # Remove old (version ...) and (generator ...) lines if they exist
     sexpr = [
@@ -517,7 +517,7 @@ def ensure_project_symbol_header(project_sym_path: Path, project_version: int):
     # Insert new header fields after the root symbol list marker
     sexpr.insert(1, [Symbol("version"), target_schema])
     sexpr.insert(2, [Symbol("generator"), "CSE-Manager"])
-    if target_schema >= 20240115:
+    if target_schema >= KICAD9_SCHEMA:
         sexpr.insert(3, [Symbol("generator_version"), "9.0"])
     else:
         sexpr.insert(3, [Symbol("generator_version"), "8.0"])
@@ -597,7 +597,7 @@ def force_footprint_version(mod_text: str, dst_schema: int) -> str:
     # Main conversion logic
     # --------------------------------------------------------
 
-    if dst_schema < 20240115:
+    if dst_schema < KICAD9_SCHEMA:
         # --- Downgrade KiCad 9 → KiCad 8 ---
         name = "Unnamed_Footprint"
         if isinstance(sexp, list) and len(sexp) > 1 and isinstance(sexp[1], str):
@@ -615,10 +615,10 @@ def force_footprint_version(mod_text: str, dst_schema: int) -> str:
         has_version = False
         for sub in sexp:
             if isinstance(sub, list) and str(sub[0]) == "version":
-                sub[1] = 20221018
+                sub[1] = KICAD8_SCHEMA
                 has_version = True
         if not has_version:
-            sexp.insert(1, [Symbol("version"), 20221018])
+            sexp.insert(1, [Symbol("version"), KICAD8_SCHEMA])
 
         print(f"[INFO] Downgraded footprint '{name}' → KiCad 8 (20221018)")
         return dumps(sexp, pretty_print=True, wrap=None)
@@ -730,10 +730,10 @@ def convert_footprint_file(mod_text: str, dst_schema: int) -> str:
     name = get_footprint_name(sexp)
 
     # --- apply conversion ---
-    if dst_schema < 20240115:
+    if dst_schema < KICAD9_SCHEMA:
         # downgrade 9 → 8
         sexp = replace_root_tag(sexp, "module", name)
-        replace_version_recursive(sexp, 20221018)
+        replace_version_recursive(sexp, KICAD8_SCHEMA)
         sexp = downgrade(sexp)
         print(f"[INFO] Downgraded footprint → KiCad 8 (module {name})")
     else:
@@ -900,7 +900,7 @@ def normalize_expr_for_project(expr, project_version: int):
     # --------------------------------------------------------------------------
     # Main flow
     # --------------------------------------------------------------------------
-    if project_version < 20240115:  # KiCad 8 mode
+    if project_version < KICAD9_SCHEMA:  # KiCad 8 mode
         expr = deep_strip(expr)
         expr = strip_hide_flags(expr)
         expr = ensure_pin_headers(expr)
@@ -915,22 +915,22 @@ def normalize_expr_for_project(expr, project_version: int):
         found = False
         for i, e in enumerate(expr):
             if isinstance(e, list) and e and e[0] == Symbol("version"):
-                expr[i][1] = 20221018
+                expr[i][1] = KICAD8_SCHEMA
                 found = True
                 break
         if not found:
-            expr.insert(1, [Symbol("version"), 20221018])
+            expr.insert(1, [Symbol("version"), KICAD8_SCHEMA])
 
     else:  # KiCad 9 mode
         expr = add_uuids(expr)
         found = False
         for i, e in enumerate(expr):
             if isinstance(e, list) and e and e[0] == Symbol("version"):
-                expr[i][1] = 20240115
+                expr[i][1] = KICAD9_SCHEMA
                 found = True
                 break
         if not found:
-            expr.insert(1, [Symbol("version"), 20240115])
+            expr.insert(1, [Symbol("version"), KICAD9_SCHEMA])
 
     return expr
 
@@ -1042,8 +1042,8 @@ def append_symbols_from_file(src_sym_file: Path, rename_assets=False):
 
     # --- If file doesn't exist or recreation needed ---
     if not project_sym_path.exists() or new_file_content is None:
-        target_schema = 20240115 if project_version >= 20240115 else 20221018
-        generator_version = "9.0" if target_schema >= 20240115 else "8.0"
+        target_schema = KICAD9_SCHEMA if project_version >= KICAD9_SCHEMA else KICAD8_SCHEMA
+        generator_version = "9.0" if target_schema >= KICAD9_SCHEMA else "8.0"
         header = [
             ["version", target_schema],
             ["generator", "CSE-Manager"],
@@ -1162,7 +1162,7 @@ def process_zip(zip_file, rename_assets=False):
 
     # --- Step 4: Import footprints ---
     project_version = detect_project_version(PROJECT_DIR)
-    dst_schema = 20221018 if project_version < 20240115 else 20241229
+    dst_schema = KICAD8_SCHEMA if project_version < KICAD9_SCHEMA else 20241229
     print(f"[DEBUG] Target project schema for footprints: {dst_schema}")
 
     for mod_file in kicad_root.rglob("*.kicad_mod"):
@@ -1176,7 +1176,7 @@ def process_zip(zip_file, rename_assets=False):
                 mod_text = f.read()
 
             # --- Detect source schema ---
-            src_schema = 20221018
+            src_schema = KICAD8_SCHEMA
             match = re.search(r"\(version\s+(\d+)\)", mod_text)
             if match:
                 try:
@@ -1199,7 +1199,7 @@ def process_zip(zip_file, rename_assets=False):
             with open(dest, "w", encoding="utf-8") as f:
                 f.write(mod_text)
 
-            print(f'[OK] Added footprint "{mod_file.name}" (KiCad {"8" if dst_schema < 20240115 else "9"} schema).')
+            print(f'[OK] Added footprint "{mod_file.name}" (KiCad {"8" if dst_schema < KICAD9_SCHEMA else "9"} schema).')
 
         except Exception as e:
             print(f"[FAIL] Error processing footprint {mod_file.name}: {e}")
