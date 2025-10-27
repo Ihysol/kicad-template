@@ -1,81 +1,45 @@
+# cli_main.py
+"""
+KiCad Library Manager CLI
+=========================
+Unified CLI entry point for processing, purging, or exporting component ZIPs.
+
+Usage examples:
+    python cli_main.py process my_part.zip --rename-assets
+    python cli_main.py purge my_part.zip
+    python cli_main.py export --symbols U1 U2 U3
+"""
+
 import sys
-from pathlib import Path
-import argparse
 import locale
-import io
+import argparse
+from pathlib import Path
+from io import StringIO
+import contextlib
 
-def process_cli_action(paths, action, rename_assets=False):
-    """
-    paths: list of Path objects
-    action: "process", "purge", or "export"
-    rename_assets: bool
-    Returns: (success: bool, output_str: str)
-    """
-    from library_manager import process_zip, purge_zip_contents, export_symbols
-
-    output_lines = []
-    success = True
-
-    try:
-        for p in paths:
-            if action == "process":
-                output_lines.append(f"PROCESS {p.name}")
-                try:
-                    process_zip(p, rename_assets=rename_assets)
-                    output_lines.append(f"[OK] {p.name} processed successfully.")
-                except Exception as e:
-                    output_lines.append(f"[ERROR] {p.name} failed: {e}")
-                    success = False
-
-            elif action == "purge":
-                output_lines.append(f"PURGE {p.name}")
-                try:
-                    purge_zip_contents(p)
-                    output_lines.append(f"[OK] {p.name} purged successfully.")
-                except Exception as e:
-                    output_lines.append(f"[ERROR] {p.name} failed during purge: {e}")
-                    success = False
-
-            elif action == "export":
-                output_lines.append(f"EXPORT {p}")
-                try:
-                    export_symbols([p.name] if isinstance(p, Path) else [str(p)])
-                    output_lines.append(f"[OK] Exported symbols to output ZIP.")
-                except Exception as e:
-                    output_lines.append(f"[ERROR] Export failed: {e}")
-                    success = False
-
-        return success, "\n".join(output_lines)
-    except Exception as e:
-        return False, f"CLI action failed globally: {e}"
-
-# =========================================================
-# UNICODE FIX (Windows): Ensure UTF-8 output for console
-# =========================================================
+# --- UTF-8 fix for Windows console ---
 if sys.platform.startswith("win"):
-    if locale.getpreferredencoding(False) not in ["UTF-8", "utf8"]:
+    if locale.getpreferredencoding(False).lower() not in {"utf-8", "utf8"}:
         try:
-            sys.stdout = io.TextIOWrapper(
-                sys.stdout.buffer, encoding="utf-8", errors="replace"
-            )
-            sys.stderr = io.TextIOWrapper(
-                sys.stderr.buffer, encoding="utf-8", errors="replace"
-            )
+            sys.stdout = StringIO()
+            sys.stderr = StringIO()
         except Exception:
             pass
 
-# =========================================================
-# Import library logic
-# =========================================================
+# --- Import project logic ---
 from library_manager import (
     INPUT_ZIP_FOLDER,
     PROJECT_SYMBOL_LIB,
-    list_symbols_simple,
     process_zip,
     purge_zip_contents,
     export_symbols,
+    list_symbols_simple,
 )
 
+
+# =========================================================
+# CLI argument parser
+# =========================================================
 def parse_arguments(argv=None):
     parser = argparse.ArgumentParser(
         description="KiCad Library Manager CLI",
@@ -85,114 +49,113 @@ def parse_arguments(argv=None):
     parser.add_argument(
         "action",
         choices=["process", "purge", "export"],
-        help='Action: "process" (import), "purge" (delete), or "export" (create ZIP).',
+        help='Action: "process" (import), "purge" (delete), or "export" (create ZIP)',
     )
-
     parser.add_argument(
         "--rename-assets",
         action="store_true",
-        help="(Process Only) Rename associated footprints and .stp files to match the symbol name before processing.",
+        help="(Process only) Rename footprints and 3D models to match the symbol name.",
     )
-
     parser.add_argument(
-        "--input_folder",
+        "--input-folder",
         type=str,
-        help=f"Override the source folder containing ZIP files (default: '{INPUT_ZIP_FOLDER}')",
+        help=f"Folder containing ZIPs (default: {INPUT_ZIP_FOLDER})",
     )
-
     parser.add_argument(
         "--symbols",
         nargs="*",
         default=[],
-        help="Symbol names to export (for 'export' action).",
+        help="Symbol names for export (used with 'export' action).",
     )
-
     parser.add_argument(
         "zip_files",
         nargs="*",
         type=str,
-        default=[],
-        help="ZIP files to act upon. If empty, all zips in folder are used (for process/purge).",
+        help="ZIP files to process or purge. If empty, uses all ZIPs in input folder.",
     )
+
     return parser.parse_args(argv)
 
+
+# =========================================================
+# Main runner function
+# =========================================================
 def run_cli_action(action: str, zip_files=None, input_folder=None, rename_assets=False, symbols=None):
     """
-    Core runner: can be called from GUI or CLI.
-    Returns (success: bool, output: str).
-    """
-    from io import StringIO
-    import contextlib
+    Unified entry point for CLI and GUI.
 
+    Returns:
+        (success: bool, output: str)
+    """
     if zip_files is None:
         zip_files = []
     if symbols is None:
         symbols = []
 
-    argv = [action]
-    if input_folder:
-        argv += ["--input_folder", str(input_folder)]
-    if rename_assets:
-        argv.append("--rename-assets")
-    if symbols:
-        argv += ["--symbols"] + symbols
-    argv += zip_files
+    args = parse_arguments(
+        [action]
+        + (["--input-folder", str(input_folder)] if input_folder else [])
+        + (["--rename-assets"] if rename_assets else [])
+        + (["--symbols"] + symbols if symbols else [])
+        + zip_files
+    )
 
-    args = parse_arguments(argv)
+    output = StringIO()
+    success = True
 
-    source_folder = Path(args.input_folder) if args.input_folder else INPUT_ZIP_FOLDER
-    buffer = StringIO()
+    with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+        folder = Path(args.input_folder) if args.input_folder else INPUT_ZIP_FOLDER
 
-    with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
         if args.action == "export":
             if not args.symbols:
-                print("ERROR: No symbols specified for export.")
-                return False, buffer.getvalue()
+                print("[FAIL] No symbols specified for export.")
+                return False, output.getvalue()
 
-            print(f"\n--- EXPORTING {len(args.symbols)} SYMBOL(S) ---")
-            success = export_symbols(args.symbols)
-            print("\n--- EXPORT COMPLETE ---")
-            return success, buffer.getvalue()
+            print(f"--- EXPORTING {len(args.symbols)} SYMBOL(S) ---")
+            export_symbols(args.symbols)
+            print("--- EXPORT COMPLETE ---")
+            return True, output.getvalue()
 
-        # For process/purge actions:
-        zip_paths = (
-            [Path(f) for f in args.zip_files]
-            if args.zip_files
-            else list(source_folder.glob("*.zip"))
-        )
-
-        is_purge = args.action == "purge"
-        mode_name = "PURGE" if is_purge else "PROCESSING"
-
+        # For process/purge:
+        zip_paths = [Path(z) for z in args.zip_files] if args.zip_files else list(folder.glob("*.zip"))
         if not zip_paths:
-            print(f"Warning: No ZIP files found in '{source_folder}'.")
-            print("\n--- Final List of Main Symbols ---")
+            print(f"[WARN] No ZIP files found in '{folder}'.")
             list_symbols_simple(PROJECT_SYMBOL_LIB, print_list=True)
-            return False, buffer.getvalue()
+            return False, output.getvalue()
 
-        for zip_file in zip_paths:
-            print(f"\n--- {mode_name} {zip_file.name} ---")
-            if is_purge:
-                purge_zip_contents(zip_file)
-            else:
-                process_zip(zip_file, rename_assets=args.rename_assets)
+        for z in zip_paths:
+            print(f"\n--- {args.action.upper()} {z.name} ---")
+            try:
+                if args.action == "purge":
+                    purge_zip_contents(z)
+                else:
+                    process_zip(z, rename_assets=args.rename_assets)
+                print(f"[OK] {z.name} done.")
+            except Exception as e:
+                print(f"[FAIL] {z.name} failed: {e}")
+                success = False
 
-        print("\n--- Final List of Main Symbols ---")
+        print("\n--- FINAL SYMBOL LIST ---")
         list_symbols_simple(PROJECT_SYMBOL_LIB, print_list=True)
 
-    return True, buffer.getvalue()
+    return success, output.getvalue()
 
+
+# =========================================================
+# CLI entry point
+# =========================================================
 def main():
     args = parse_arguments()
-    success, output = run_cli_action(
+    success, out = run_cli_action(
         action=args.action,
         zip_files=args.zip_files,
         input_folder=args.input_folder,
         rename_assets=args.rename_assets,
         symbols=args.symbols,
     )
-    print(output)
+    print(out)
     sys.exit(0 if success else 1)
+
 
 if __name__ == "__main__":
     main()
