@@ -118,21 +118,22 @@ def refresh_symbol_list(dpg):
 # Font loading
 # -------------------------
 
-
 def find_font_recursively(font_name: str) -> Path | None:
-    """Search recursively for a font file in common folders."""
     import sys
-
     if getattr(sys, "frozen", False):
-        base = Path(sys.executable).resolve().parent
+        base = Path(sys._MEIPASS)  # PyInstaller-Temp-Ordner
     else:
         base = Path(__file__).resolve().parent
-    for root in [base, base / "src", base / "fonts", base / "src" / "fonts"]:
+
+    for root in [base, base / "fonts"]:
         if root.exists():
             for path in root.rglob(font_name):
                 return path
-    print(f"⚠️ Font '{font_name}' not found in {base} or common subdirectories.")
+    print(f"⚠️ Font '{font_name}' not found in {base}")
     return None
+
+
+
 
 
 def load_font_recursively(font_name: str, size: int = 18):

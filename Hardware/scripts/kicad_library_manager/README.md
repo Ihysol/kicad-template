@@ -42,3 +42,14 @@ Or run the standalone executable (`cse_manager.exe` on Windows or `cse_manager` 
 ## Folder Structure
 
 * **library_input/** – Folder for `.zip` files or component definitions to be imported. `.zip` files here are ignored by Git.
+
+## Build the executable
+
+```
+# Windows:
+pyinstaller --onefile --name kicad_library_manager --noconsole --add-data "fonts/NotoSans-Regular.ttf;fonts" main_gui.py
+
+# Linux:
+pyinstaller --onefile --name kicad_library_manager --noconsole --add-data "fonts/NotoSans-Regular.ttf:fonts" main_gui.py
+```
+
