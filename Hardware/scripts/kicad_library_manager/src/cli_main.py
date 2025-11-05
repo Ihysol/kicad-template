@@ -73,6 +73,13 @@ def parse_arguments(argv=None):
         type=str,
         help="ZIP files to process or purge. If empty, uses all ZIPs in input folder.",
     )
+    parser.add_argument(
+        "--use-symbol-name",
+        action="store_true",
+        help="Use symbol name as footprint and 3D model name.",
+    )
+
+
 
     return parser.parse_args(argv)
 
@@ -80,7 +87,7 @@ def parse_arguments(argv=None):
 # =========================================================
 # Main runner function
 # =========================================================
-def run_cli_action(action: str, zip_files=None, input_folder=None, rename_assets=False, symbols=None):
+def run_cli_action(action: str, zip_files=None, input_folder=None, rename_assets=False, use_symbol_name=False, symbols=None):
     """
     Unified entry point for CLI and GUI.
 
@@ -96,9 +103,11 @@ def run_cli_action(action: str, zip_files=None, input_folder=None, rename_assets
         [action]
         + (["--input-folder", str(input_folder)] if input_folder else [])
         + (["--rename-assets"] if rename_assets else [])
+        + (["--use-symbol-name"] if use_symbol_name else [])
         + (["--symbols"] + symbols if symbols else [])
         + zip_files
     )
+
 
     output = StringIO()
     success = True
@@ -129,7 +138,8 @@ def run_cli_action(action: str, zip_files=None, input_folder=None, rename_assets
                 if args.action == "purge":
                     purge_zip_contents(z)
                 else:
-                    process_zip(z, rename_assets=args.rename_assets)
+                    process_zip(z, rename_assets=args.rename_assets, use_symbol_name=args.use_symbol_name)
+
                 print(f"[OK] {z.name} done.")
             except Exception as e:
                 print(f"[FAIL] {z.name} failed: {e}")
@@ -151,8 +161,10 @@ def main():
         zip_files=args.zip_files,
         input_folder=args.input_folder,
         rename_assets=args.rename_assets,
+        use_symbol_name=args.use_symbol_name,
         symbols=args.symbols,
     )
+
     print(out)
     sys.exit(0 if success else 1)
 

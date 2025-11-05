@@ -18,6 +18,7 @@ from gui_core import (
     toggle_selection_mode,
     initial_load,
     on_tab_change,
+    USE_SYMBOLNAME_KEY
 )
 
 # ===============================
@@ -39,6 +40,8 @@ class DpgShim:
 
     def get_value(self, tag):
         # Simulate DPG tags for backend compatibility
+        if tag == "use_symbol_name_chkbox":
+            return self.chk_use_symbol_name.GetValue()
         if tag == "current_path_text":
             return self._values.get(tag, self.gui.current_folder_txt.GetLabel())
         if tag == "source_tab_bar":
@@ -178,6 +181,9 @@ class MainFrame(wx.Frame):
         self.Centre()
         self.Show()
         initial_load(self.shim)
+        cfg = load_config()
+        self.chk_use_symbol_name.SetValue(cfg.get(USE_SYMBOLNAME_KEY, False))
+
 
     # ---------- Layout ----------
     def InitUI(self):
@@ -211,7 +217,7 @@ class MainFrame(wx.Frame):
         # --- ZIP tab content ---
         self.zip_vbox = wx.BoxSizer(wx.VERTICAL)
 
-        # === Top controls: Refresh + master checkbox ===
+        # === Top controls ===
         h_zip_top = wx.BoxSizer(wx.HORIZONTAL)
         self.btn_refresh_zips = wx.Button(self.tab_zip, label="Refresh ZIPs")
         self.chk_master_zip = wx.CheckBox(self.tab_zip, label="Select All")
@@ -219,7 +225,7 @@ class MainFrame(wx.Frame):
         h_zip_top.Add(self.chk_master_zip, 0, wx.ALIGN_CENTER_VERTICAL)
         self.zip_vbox.Add(h_zip_top, 0, wx.BOTTOM, 5)
 
-        # === ZIP file list with status ===
+        # === ZIP file list ===
         self.zip_file_list = dv.DataViewListCtrl(
             self.tab_zip,
             style=dv.DV_ROW_LINES | dv.DV_VERT_RULES | dv.DV_SINGLE
@@ -230,13 +236,12 @@ class MainFrame(wx.Frame):
         self.zip_vbox.Add(wx.StaticText(self.tab_zip, label="ZIP Archives:"), 0, wx.BOTTOM, 5)
         self.zip_vbox.Add(self.zip_file_list, 1, wx.EXPAND | wx.BOTTOM, 5)
 
-        # === Import options ===
-        options_box = wx.BoxSizer(wx.VERTICAL)
-        self.chk_use_symbol_name = wx.CheckBox(self.tab_zip, label="Use symbol name as footprint and 3D model name")
-        self.chk_skip_existing = wx.CheckBox(self.tab_zip, label="Skip existing symbols already in project")
-        options_box.Add(self.chk_use_symbol_name, 0, wx.BOTTOM, 3)
-        options_box.Add(self.chk_skip_existing, 0, wx.BOTTOM, 3)
-        self.zip_vbox.Add(options_box, 0, wx.TOP | wx.BOTTOM, 5)
+        # === Option checkbox ===
+        self.chk_use_symbol_name = wx.CheckBox(
+            self.tab_zip,
+            label="Use symbol name as footprint and 3D model name"
+        )
+        self.zip_vbox.Add(self.chk_use_symbol_name, 0, wx.TOP | wx.BOTTOM, 5)
 
         # === Process / Purge buttons ===
         self.btn_process = wx.Button(self.tab_zip, label="PROCESS / IMPORT")
@@ -303,6 +308,8 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_BUTTON, lambda e: self.open_url("https://github.com/Ihysol/kicad-template"), self.btn_issues)
         self.Bind(wx.EVT_BUTTON, self.on_refresh_symbols, self.btn_refresh_symbols)
         self.Bind(wx.EVT_CHECKLISTBOX, self.on_symbol_item_toggled, self.symbol_list)
+        self.Bind(wx.EVT_CHECKBOX, self.on_use_symbol_name_toggled, self.chk_use_symbol_name)
+
         self.Bind(wx.EVT_CHECKBOX, self.on_master_symbols_toggle, self.chk_master_symbols)
         self.Bind(wx.EVT_BUTTON, self.on_export, self.btn_export)
         self.Bind(wx.EVT_BUTTON, self.on_open_output, self.btn_open_output)
@@ -317,6 +324,15 @@ class MainFrame(wx.Frame):
         self.notebook.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self.on_tab_changed)
 
     # ---------- Event handlers ----------
+    
+    def on_use_symbol_name_toggled(self, event):
+        """Save preference to backend config."""
+        from gui_core import save_config, USE_SYMBOLNAME_KEY
+        value = self.chk_use_symbol_name.IsChecked()
+        save_config(USE_SYMBOLNAME_KEY, value)
+        state = "enabled" if value else "disabled"
+        self.append_log(f"[INFO] 'Use symbol name as footprint/3D model' {state}.")
+        
     def open_url(self, url):
         import webbrowser
         webbrowser.open_new_tab(url)
@@ -378,6 +394,8 @@ class MainFrame(wx.Frame):
         event.Skip()
 
     def set_value(self, tag, value):
+        if tag == "use_symbol_name_chkbox":
+            self.chk_use_symbol_name.SetValue(bool(value))
         if tag == "current_path_text":
             self.current_folder_txt.SetLabel(value)
         self._values[tag] = value

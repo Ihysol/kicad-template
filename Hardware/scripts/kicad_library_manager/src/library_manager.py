@@ -257,18 +257,26 @@ def _convert_symbol_recursive(sym_node, src_schema, dst_schema):
 # Symbol normalization for project (KiCad 8 hide rules, property placement, etc.)
 # ---------------------------------------------------------------------------------
 
-def normalize_expr_for_project(expr, project_version: int):
+def normalize_expr_for_project(
+    expr,
+    project_version: int,
+    property_offset_x: float = 20.0,   # distance from rightmost pin
+    property_step_y: float = -2.0      # vertical spacing between properties
+):
     """
     Project-facing cleanup:
-    - KiCad 8: strip unsupported stuff, make sure pin headers exist,
-        hide/move non-Reference/Value properties to the right of the symbol.
-    - KiCad 9: ensure (uuid ...) in symbols.
-    Also ensures (version ...) matches 8/9 schema.
+    - KiCad 8: strip unsupported nodes, ensure pin headers, hide/move properties.
+    - KiCad 9: ensure (uuid ...) and also hide/move properties.
+    - Ensures (version ...) matches target schema.
     """
-    HIDDEN_OFFSET_MARGIN_X = 30  # mm to right of rightmost pin
-    HIDDEN_OFFSET_STEP_Y = -2    # vertical spacing between properties
+
+    HIDDEN_OFFSET_MARGIN_X = property_offset_x
+    HIDDEN_OFFSET_STEP_Y = property_step_y
     HIDDEN_ROT = 0
 
+    # -------------------------------------------------------------------------
+    # Helper functions
+    # -------------------------------------------------------------------------
     def deep_strip(e):
         """Remove KiCad9-only nodes that KiCad8 doesn't understand."""
         banned = {
@@ -335,8 +343,8 @@ def normalize_expr_for_project(expr, project_version: int):
         return sym
 
     def get_rightmost_pin_x(symbol_node):
-        """Max pin X (for property placement offset)."""
-        max_x = 0
+        """Return maximum pin X coordinate for placement offset."""
+        max_x = 0.0
         for child in symbol_node:
             if isinstance(child, list) and child and child[0] == Symbol("pin"):
                 for elem in child:
@@ -351,23 +359,22 @@ def normalize_expr_for_project(expr, project_version: int):
 
     def fix_property_layout_recursive(node, rightmost_x=0, prop_index=[0], for_kicad8=False):
         """
-        For all properties except Reference/Value:
-        - place them at x=right_of_symbol, y staggered by 2mm
-        - hide them (KiCad8 style or KiCad9 style)
+        Move all symbol properties except Reference/Value to the right of the rightmost pin.
         """
         if not isinstance(node, list):
             return node
 
         if node and node[0] == Symbol("property"):
             name = str(node[1]).strip('"') if len(node) > 1 else ""
+            # Skip the two main labels
             if name not in ("Reference", "Value"):
-                # wipe old at/hide/effects
+                # Remove old positioning/effects/hide
                 node[:] = [
                     x for x in node
                     if not (
                         isinstance(x, list)
                         and x
-                        and x[0] in (Symbol("at"), Symbol("hide"), Symbol("effects"))
+                        and x[0] in (Symbol("at"), Symbol("effects"), Symbol("hide"))
                     )
                 ]
 
@@ -375,31 +382,28 @@ def normalize_expr_for_project(expr, project_version: int):
                 y_offset = HIDDEN_OFFSET_STEP_Y * prop_index[0]
                 prop_index[0] += 1
 
+                # Add new left-justified hidden placement
                 if for_kicad8:
-                    node.append([
-                        Symbol("effects"),
-                        [Symbol("justify"), Symbol("left")],
-                        [Symbol("hide")],
-                    ])
+                    node.append([Symbol("effects"), [Symbol("justify"), Symbol("left")], [Symbol("hide")]])
                 else:
-                    node.append([
-                        Symbol("effects"),
-                        [Symbol("justify"), Symbol("left")],
-                    ])
+                    node.append([Symbol("effects"), [Symbol("justify"), Symbol("left")]])
                     node.append([Symbol("hide"), Symbol("yes")])
 
                 node.append([Symbol("at"), x_offset, y_offset, 0])
 
         for i, sub in enumerate(node):
             if isinstance(sub, list):
-                node[i] = fix_property_layout_recursive(
-                    sub, rightmost_x, prop_index, for_kicad8
-                )
+                node[i] = fix_property_layout_recursive(sub, rightmost_x, prop_index, for_kicad8)
+
         return node
 
-    # Main branch: KiCad 8 vs 9
+
+
+    # -------------------------------------------------------------------------
+    # Main logic
+    # -------------------------------------------------------------------------
     if project_version < KICAD9_SCHEMA:
-        # KiCad 8
+        # ---------------- KiCad 8 ----------------
         expr = deep_strip(expr)
         expr = strip_hide_flags(expr)
         expr = ensure_pin_headers(expr)
@@ -415,7 +419,7 @@ def normalize_expr_for_project(expr, project_version: int):
                         for_kicad8=True,
                     )
 
-        # fix (version ...)
+        # ensure (version ...)
         found = False
         for i, e in enumerate(expr):
             if isinstance(e, list) and e and e[0] == Symbol("version"):
@@ -426,9 +430,22 @@ def normalize_expr_for_project(expr, project_version: int):
             expr.insert(1, [Symbol("version"), KICAD8_SCHEMA])
 
     else:
-        # KiCad 9
+        # ---------------- KiCad 9 ----------------
         expr = add_uuids(expr)
 
+        # Apply same property placement logic for KiCad 9
+        if isinstance(expr, list):
+            for i, child in enumerate(expr):
+                if isinstance(child, list) and child and child[0] == Symbol("symbol"):
+                    rightmost_x = get_rightmost_pin_x(child)
+                    expr[i] = fix_property_layout_recursive(
+                        child,
+                        rightmost_x,
+                        prop_index=[0],
+                        for_kicad8=False,
+                    )
+
+        # ensure (version ...)
         found = False
         for i, e in enumerate(expr):
             if isinstance(e, list) and e and e[0] == Symbol("version"):
@@ -439,6 +456,7 @@ def normalize_expr_for_project(expr, project_version: int):
             expr.insert(1, [Symbol("version"), KICAD9_SCHEMA])
 
     return expr
+
 
 
 def ensure_project_symbol_header(project_sym_path: Path, project_version: int):
@@ -766,60 +784,102 @@ def localize_3d_model_path(mod_file: Path, footprint_map: dict, mod_text: str | 
     return dumps(mod_sexp, pretty_print=True, wrap=None) if modified else mod_text
 
 
-def rename_extracted_assets(tempdir: Path, footprint_map: dict) -> int:
+def rename_extracted_assets(tempdir: Path, footprint_map: dict, use_symbol_name: bool = False) -> int:
     """
-    Rename .kicad_mod and .stp inside `tempdir` to match the canonical symbol name,
-    update footprint_map accordingly, persist map.
+    Rename extracted footprints and 3D models according to the given mapping.
+    If use_symbol_name=True, rename using the symbol base name instead.
+    Returns the number of renamed files.
     """
-    renamed_count = 0
+    print("[INFO] rename_extracted_assets() called")
+    print(f"[DEBUG] use_symbol_name={use_symbol_name}, tempdir={tempdir}")
+    if not footprint_map:
+        print("[WARN] footprint_map is empty")
+    else:
+        print(f"[DEBUG] footprint_map has {len(footprint_map)} entries:")
+    for k, v in footprint_map.items():
+        print(f"    {k} → {v}")
 
-    # footprints
+    rename_count = 0
+
+    print("[DEBUG] rename_extracted_assets() called")
+    print(f"[DEBUG] use_symbol_name={use_symbol_name}, tempdir={tempdir}")
+    print(f"[DEBUG] footprint_map has {len(footprint_map)} entries:")
+    for k, v in footprint_map.items():
+        print(f"    {k} → {v}")
+
+    # --- Footprints ---
     for mod_file in tempdir.rglob("*.kicad_mod"):
-        footprint_name = mod_file.stem
-        symbol_name = footprint_map.get(footprint_name)
+        stem = mod_file.stem
+        new_name = mod_file.name
+        symname = None
 
-        if symbol_name and symbol_name != footprint_name:
-            new_name = symbol_name + mod_file.suffix
-            new_path = mod_file.parent / new_name
-            if not new_path.exists():
+        if use_symbol_name:
+            # find symbol name for this footprint name
+            if stem in footprint_map:
+                symname = footprint_map[stem]
+        elif stem in footprint_map:
+            # legacy rename mode
+            symname = footprint_map[stem]
+
+        if symname:
+            new_name = f"{symname}.kicad_mod"
+        else:
+            print(f"[DEBUG] No match for footprint {stem} in footprint_map")
+
+        new_path = mod_file.with_name(new_name)
+        if new_path != mod_file:
+            try:
                 mod_file.rename(new_path)
-                renamed_count += 1
-                print(f"Renamed Footprint: {mod_file.name} -> {new_name}")
+                rename_count += 1
+                print(f"[OK] Renamed footprint: {mod_file.name} → {new_path.name}")
+            except Exception as e:
+                print(f"[FAIL] Error renaming footprint {mod_file.name}: {e}")
 
-                del footprint_map[footprint_name]
-                footprint_map[symbol_name] = symbol_name
+    # --- 3D Models ---
+    for model_file in tempdir.rglob("*.stp"):
+        stem = model_file.stem
+        new_name = model_file.name
+        symname = None
 
-    # 3D models
-    for stp_file in tempdir.rglob("*.stp"):
-        model_stem = stp_file.stem
-        target_symbol_name = None
+        if use_symbol_name:
+            if stem in footprint_map:
+                symname = footprint_map[stem]
+        elif stem in footprint_map:
+            symname = footprint_map[stem]
 
-        if model_stem in footprint_map:
-            target_symbol_name = footprint_map[model_stem]
-        elif model_stem in footprint_map.values():
-            target_symbol_name = model_stem
+        if symname:
+            new_name = f"{symname}{model_file.suffix}"
+        else:
+            print(f"[DEBUG] No match for 3D model {stem} in footprint_map")
 
-        if target_symbol_name and target_symbol_name != model_stem:
-            new_name = target_symbol_name + stp_file.suffix
-            new_path = stp_file.parent / new_name
-            if not new_path.exists():
-                stp_file.rename(new_path)
-                renamed_count += 1
-                print(f"Renamed 3D Model: {stp_file.name} -> {new_name}")
+        new_path = model_file.with_name(new_name)
+        if new_path != model_file:
+            try:
+                model_file.rename(new_path)
+                rename_count += 1
+                print(f"[OK] Renamed 3D model: {model_file.name} → {new_path.name}")
+            except Exception as e:
+                print(f"[FAIL] Error renaming 3D model {model_file.name}: {e}")
 
-    if renamed_count > 0:
-        with open(TEMP_MAP_FILE, "w") as f:
-            json.dump(footprint_map, f, indent=4)
-        print(f"INFO: Saved updated footprint_map with {len(footprint_map)} entries.")
+    if rename_count == 0:
+        print("[WARN] No files were renamed — check footprint_map keys vs extracted file names:")
+    for mod in tempdir.rglob("*.kicad_mod"):
+        print(f"    found footprint file: {mod.name}")
+    for stp in tempdir.rglob("*.stp"):
+        print(f"    found 3D model file: {stp.name}")
+    else:
+        print(f"[INFO] Renamed {rename_count} files total.")
 
-    return renamed_count
+
+    return rename_count
+
 
 
 # ---------------------------------------------------------------------------------
 # ZIP import / purge / export
 # ---------------------------------------------------------------------------------
 
-def process_zip(zip_file, rename_assets: bool = False):
+def process_zip(zip_file, rename_assets: bool = False, use_symbol_name: bool = False):
     """
     Import one vendor ZIP:
     - extract
@@ -828,6 +888,9 @@ def process_zip(zip_file, rename_assets: bool = False):
     - convert footprints to project schema and localize model paths
     - copy .stp models
     """
+    if use_symbol_name:
+        print(f"[INFO] Using symbol name as footprint and 3D model name for {zip_file.name}")
+    
     # Prep temp extraction dir
     zip_file = Path(str(zip_file).strip()).resolve()
     tempdir = (INPUT_ZIP_FOLDER / "temp_extracted").resolve()
@@ -889,7 +952,7 @@ def process_zip(zip_file, rename_assets: bool = False):
     symbols_added = False
     for sym_file in symbol_files:
         print(f"[DEBUG] Processing symbol file: {sym_file}")
-        if append_symbols_from_file(sym_file, rename_assets=rename_assets):
+        if append_symbols_from_file(sym_file, rename_assets=(rename_assets or use_symbol_name)):
             symbols_added = True
 
     if not symbols_added and not TEMP_MAP_FILE.exists():
@@ -905,13 +968,21 @@ def process_zip(zip_file, rename_assets: bool = False):
         print(f"[DEBUG] Loaded footprint map with {len(footprint_map)} entries.")
 
     # --- rename assets in temp if desired ---
-    if rename_assets:
-        print("[INFO] Renaming of Footprints/3D Models ENABLED.")
-        rename_count = rename_extracted_assets(tempdir, footprint_map)
+    if rename_assets or use_symbol_name:
+        mode = "Symbol-name based" if use_symbol_name else "Default"
+        print(f"[INFO] Renaming of Footprints/3D Models ENABLED ({mode}).")
+
+        rename_count = rename_extracted_assets(
+            tempdir,
+            footprint_map,
+            use_symbol_name=use_symbol_name
+        )
+
         if rename_count > 0 and TEMP_MAP_FILE.exists():
             with open(TEMP_MAP_FILE, "r") as f:
                 footprint_map = json.load(f)
         print(f"[INFO] Renamed {rename_count} assets.")
+
 
     # --- footprints ---
     project_version = detect_project_version(PROJECT_DIR)

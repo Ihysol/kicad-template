@@ -65,18 +65,24 @@ else:
     CONFIG_FILE = Path(__file__).parent / "gui_config.json"
 
 RENAME_ASSETS_KEY = "rename_assets_default"
+USE_SYMBOLNAME_KEY = "use_symbol_name_as_ref"
 
 
 def load_config() -> Dict[str, Any]:
     """Load persisted GUI settings (checkbox state, etc)."""
+    cfg = {}
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                cfg = json.load(f)
         except Exception:
-            # corrupted config? act like empty
-            return {}
-    return {}
+            cfg = {}
+
+    # Defaults
+    cfg.setdefault(RENAME_ASSETS_KEY, False)
+    cfg.setdefault(USE_SYMBOLNAME_KEY, False)
+    return cfg
+
 
 
 def save_config(key: str, value: Any) -> None:
@@ -385,7 +391,7 @@ def check_zip_for_existing_symbols(zip_paths: List[Path]):
 # ---------------------------
 
 
-def execute_library_action(paths: List[Path], is_purge: bool, rename_assets: bool):
+def execute_library_action(paths: List[Path], is_purge: bool, rename_assets: bool, use_symbol_name: bool = False):
     """
     Execute cli_main.py "process" or "purge".
     Keeps same branching between frozen .exe and dev .py.
@@ -424,8 +430,13 @@ def execute_library_action(paths: List[Path], is_purge: bool, rename_assets: boo
             action_str = "purge" if is_purge else "process"
 
             cmd = [python_exe, str(CLI_SCRIPT_PATH), action_str]
-            if rename_assets and not is_purge:
-                cmd.append("--rename-assets")
+
+            if not is_purge:
+                if rename_assets:
+                    cmd.append("--rename-assets")
+                if use_symbol_name:
+                    cmd.append("--use-symbol-name")
+
             cmd.extend([str(p) for p in paths])
 
             result = subprocess.run(
@@ -462,21 +473,34 @@ def get_active_files_for_processing(dpg) -> List[Path]:
 def process_action(dpg, sender, app_data, is_purge: bool):
     """
     Main handler behind PROCESS / PURGE buttons.
-    - gather selected ZIPs
-    - run CLI
-    - stream output to log_message()
-    - refresh cache/UI after success
+    Now backend-driven: no GUI dependency for 'use symbol name as footprint/3D model name'.
     """
+
     active_files = get_active_files_for_processing(dpg)
     if not active_files:
         log_message(dpg, None, None, "ERROR: No active ZIP files selected for action.")
         return
 
-    # read rename checkbox (only relevant for PROCESS)
-    rename_assets = False
-    if not is_purge and dpg.does_item_exist("rename_assets_chk"):
-        rename_assets = dpg.get_value("rename_assets_chk")
+    # --------------------------
+    # Read backend config defaults
+    # --------------------------
+    cfg = load_config()
+    rename_assets = cfg.get(RENAME_ASSETS_KEY, False)
+    use_symbolname_as_ref = cfg.get(USE_SYMBOLNAME_KEY, False)
 
+    # --------------------------
+    # Try GUI overrides (if they exist)
+    # --------------------------
+    # DPG may not have these tags in CLI/headless mode
+    if not is_purge:
+        rename_assets = dpg_safe_get_value(dpg, "rename_assets_chk", rename_assets)
+        use_symbolname_as_ref = dpg_safe_get_value(
+            dpg, "use_symbol_name_chkbox", use_symbolname_as_ref
+        )
+
+    # --------------------------
+    # Log state
+    # --------------------------
     action_name = "PURGE" if is_purge else "PROCESS"
     log_message(
         dpg,
@@ -485,17 +509,31 @@ def process_action(dpg, sender, app_data, is_purge: bool):
         f"--- Initiating {action_name} for {len(active_files)} active file(s) ---",
     )
 
-    if not is_purge and rename_assets:
+    if not is_purge:
+        if rename_assets:
+            log_message(
+                dpg,
+                None,
+                None,
+                "INFO: Renaming of Footprints/3D Models is ENABLED.",
+            )
         log_message(
             dpg,
             None,
             None,
-            "INFO: Renaming of Footprints/3D Models is ENABLED.",
+            f"INFO: Use symbol name as footprint/3D model name: {use_symbolname_as_ref}",
         )
 
+    # --------------------------
+    # Execute CLI logic (unchanged)
+    # --------------------------
     ok, output = execute_library_action(
-        active_files, is_purge=is_purge, rename_assets=rename_assets
+        active_files,
+        is_purge=is_purge,
+        rename_assets=rename_assets,
+        use_symbol_name=use_symbolname_as_ref,
     )
+
 
     # mirror CLI output into GUI log
     for line in output.splitlines():
@@ -508,7 +546,6 @@ def process_action(dpg, sender, app_data, is_purge: bool):
             None,
             f"[OK] {action_name} SUCCESSFUL. Refreshing display...",
         )
-        # reload symbol cache and rescan same folder
         update_existing_symbols_cache(dpg)
         current_folder = get_current_folder_path(dpg)
         if current_folder is not None:
@@ -529,6 +566,7 @@ def process_action(dpg, sender, app_data, is_purge: bool):
         add_timestamp=False,
     )
     log_message(dpg, None, None, "", add_timestamp=False)
+
 
 
 # ---------------------------
