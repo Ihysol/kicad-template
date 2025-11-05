@@ -1,15 +1,32 @@
 {
-    "identifier": "com.github.ihysol.kicad-library-manager",
+    "$schema": "https://go.kicad.org/pcm/schemas/v1",
     "name": "KiCad Library Manager",
     "description": "GUI to manage, import and export KiCad libraries and DRC rules.",
-    "author": "Tobias Gent (Ihysol)",
+    "description_full": "Graphical interface for importing/exporting components, converting between KiCad 8/9 library formats, and generating DRC rule sets. Supports automatic ZIP import from ComponentSearchEngine and custom library maintenance.",
+    "identifier": "com.github.ihysol.kicad-library-manager",
+    "type": "plugin",
+    "author": {
+        "name": "Tobias Gent (Ihysol)",
+        "contact": {
+            "web": "https://github.com/Ihysol"
+        }
+    },
+    "maintainer": {
+        "name": "Tobias Gent (Ihysol)",
+        "contact": {
+            "web": "https://github.com/Ihysol"
+        }
+    },
     "license": "BSD-3-Clause",
-    "version": "1.3.2",
     "resources": {
-        "src": "."
+        "icon": "resources/icon.png",
+        "src": "plugin"
     },
-    "icons": {
-        "32": "icon.png"
-    },
-    "min_kicad_version": "7.0.0"
+    "versions": [
+        {
+            "version": "1.3.2",
+            "status": "stable",
+            "kicad_version": "7.0"
+        }
+    ]
 }
