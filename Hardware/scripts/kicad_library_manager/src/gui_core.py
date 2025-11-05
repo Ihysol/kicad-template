@@ -833,7 +833,7 @@ def reload_folder_from_path(dpg, folder_path_str: str):
 
     try:
         update_existing_symbols_cache(dpg)
-        zip_candidates = list(folder_path.glob("*.zip"))
+        zip_candidates = [f for f in folder_path.iterdir() if f.suffix.lower() == ".zip"]
         valid_paths = [p for p in zip_candidates if p.exists()]
 
         check_zip_for_existing_symbols(valid_paths)
@@ -888,7 +888,7 @@ def initial_load(dpg):
     log_message(dpg, None, None, f"Checking default folder: '{target_folder}'")
 
     try:
-        zips_here = list(target_folder.glob("*.zip"))
+        zips_here = [f for f in target_folder.iterdir() if f.suffix.lower() == ".zip"]
         valid_paths = [p for p in zips_here if p.exists()]
     except Exception as e:
         log_message(dpg, None, None, f"ERROR scanning folder: {e}")
