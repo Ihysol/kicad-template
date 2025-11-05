@@ -1,0 +1,15 @@
+{
+    "identifier": "com.github.ihysol.kicad-library-manager",
+    "name": "KiCad Library Manager",
+    "description": "GUI to manage, import and export KiCad libraries and DRC rules.",
+    "author": "Tobias Gent (Ihysol)",
+    "license": "BSD-3-Clause",
+    "version": "1.3.2",
+    "resources": {
+        "src": "."
+    },
+    "icons": {
+        "32": "icon.png"
+    },
+    "min_kicad_version": "7.0.0"
+}
