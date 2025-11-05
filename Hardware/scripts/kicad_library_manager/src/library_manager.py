@@ -257,26 +257,18 @@ def _convert_symbol_recursive(sym_node, src_schema, dst_schema):
 # Symbol normalization for project (KiCad 8 hide rules, property placement, etc.)
 # ---------------------------------------------------------------------------------
 
-def normalize_expr_for_project(
-    expr,
-    project_version: int,
-    property_offset_x: float = 20.0,   # distance from rightmost pin
-    property_step_y: float = -2.0      # vertical spacing between properties
-):
+def normalize_expr_for_project(expr, project_version: int):
     """
     Project-facing cleanup:
-    - KiCad 8: strip unsupported nodes, ensure pin headers, hide/move properties.
-    - KiCad 9: ensure (uuid ...) and also hide/move properties.
-    - Ensures (version ...) matches target schema.
+    - KiCad 8: strip unsupported stuff, make sure pin headers exist,
+        hide/move non-Reference/Value properties to the right of the symbol.
+    - KiCad 9: ensure (uuid ...) in symbols.
+    Also ensures (version ...) matches 8/9 schema.
     """
-
-    HIDDEN_OFFSET_MARGIN_X = property_offset_x
-    HIDDEN_OFFSET_STEP_Y = property_step_y
+    HIDDEN_OFFSET_MARGIN_X = 20  # mm to right of rightmost pin
+    HIDDEN_OFFSET_STEP_Y = -2    # vertical spacing between properties
     HIDDEN_ROT = 0
 
-    # -------------------------------------------------------------------------
-    # Helper functions
-    # -------------------------------------------------------------------------
     def deep_strip(e):
         """Remove KiCad9-only nodes that KiCad8 doesn't understand."""
         banned = {
@@ -343,8 +335,8 @@ def normalize_expr_for_project(
         return sym
 
     def get_rightmost_pin_x(symbol_node):
-        """Return maximum pin X coordinate for placement offset."""
-        max_x = 0.0
+        """Max pin X (for property placement offset)."""
+        max_x = 0
         for child in symbol_node:
             if isinstance(child, list) and child and child[0] == Symbol("pin"):
                 for elem in child:
@@ -359,22 +351,23 @@ def normalize_expr_for_project(
 
     def fix_property_layout_recursive(node, rightmost_x=0, prop_index=[0], for_kicad8=False):
         """
-        Move all symbol properties except Reference/Value to the right of the rightmost pin.
+        For all properties except Reference/Value:
+        - place them at x=right_of_symbol, y staggered by 2mm
+        - hide them (KiCad8 style or KiCad9 style)
         """
         if not isinstance(node, list):
             return node
 
         if node and node[0] == Symbol("property"):
             name = str(node[1]).strip('"') if len(node) > 1 else ""
-            # Skip the two main labels
             if name not in ("Reference", "Value"):
-                # Remove old positioning/effects/hide
+                # wipe old at/hide/effects
                 node[:] = [
                     x for x in node
                     if not (
                         isinstance(x, list)
                         and x
-                        and x[0] in (Symbol("at"), Symbol("effects"), Symbol("hide"))
+                        and x[0] in (Symbol("at"), Symbol("hide"), Symbol("effects"))
                     )
                 ]
 
@@ -382,28 +375,31 @@ def normalize_expr_for_project(
                 y_offset = HIDDEN_OFFSET_STEP_Y * prop_index[0]
                 prop_index[0] += 1
 
-                # Add new left-justified hidden placement
                 if for_kicad8:
-                    node.append([Symbol("effects"), [Symbol("justify"), Symbol("left")], [Symbol("hide")]])
+                    node.append([
+                        Symbol("effects"),
+                        [Symbol("justify"), Symbol("left")],
+                        [Symbol("hide")],
+                    ])
                 else:
-                    node.append([Symbol("effects"), [Symbol("justify"), Symbol("left")]])
+                    node.append([
+                        Symbol("effects"),
+                        [Symbol("justify"), Symbol("left")],
+                    ])
                     node.append([Symbol("hide"), Symbol("yes")])
 
                 node.append([Symbol("at"), x_offset, y_offset, 0])
 
         for i, sub in enumerate(node):
             if isinstance(sub, list):
-                node[i] = fix_property_layout_recursive(sub, rightmost_x, prop_index, for_kicad8)
-
+                node[i] = fix_property_layout_recursive(
+                    sub, rightmost_x, prop_index, for_kicad8
+                )
         return node
 
-
-
-    # -------------------------------------------------------------------------
-    # Main logic
-    # -------------------------------------------------------------------------
+    # Main branch: KiCad 8 vs 9
     if project_version < KICAD9_SCHEMA:
-        # ---------------- KiCad 8 ----------------
+        # KiCad 8
         expr = deep_strip(expr)
         expr = strip_hide_flags(expr)
         expr = ensure_pin_headers(expr)
@@ -419,7 +415,7 @@ def normalize_expr_for_project(
                         for_kicad8=True,
                     )
 
-        # ensure (version ...)
+        # fix (version ...)
         found = False
         for i, e in enumerate(expr):
             if isinstance(e, list) and e and e[0] == Symbol("version"):
@@ -430,22 +426,9 @@ def normalize_expr_for_project(
             expr.insert(1, [Symbol("version"), KICAD8_SCHEMA])
 
     else:
-        # ---------------- KiCad 9 ----------------
+        # KiCad 9
         expr = add_uuids(expr)
 
-        # Apply same property placement logic for KiCad 9
-        if isinstance(expr, list):
-            for i, child in enumerate(expr):
-                if isinstance(child, list) and child and child[0] == Symbol("symbol"):
-                    rightmost_x = get_rightmost_pin_x(child)
-                    expr[i] = fix_property_layout_recursive(
-                        child,
-                        rightmost_x,
-                        prop_index=[0],
-                        for_kicad8=False,
-                    )
-
-        # ensure (version ...)
         found = False
         for i, e in enumerate(expr):
             if isinstance(e, list) and e and e[0] == Symbol("version"):
@@ -456,7 +439,6 @@ def normalize_expr_for_project(
             expr.insert(1, [Symbol("version"), KICAD9_SCHEMA])
 
     return expr
-
 
 
 def ensure_project_symbol_header(project_sym_path: Path, project_version: int):
