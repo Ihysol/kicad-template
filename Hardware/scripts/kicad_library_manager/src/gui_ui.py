@@ -34,6 +34,8 @@ from gui_core import (
     GUI_FILE_DATA,
 )
 
+from gui_core import APP_VERSION
+
 # -------------------------
 # File list UI builder
 # -------------------------
@@ -389,6 +391,11 @@ def create_gui():
                 small=True,
             )
             dpg.bind_item_theme(issues, "hyperlink_theme")
+            dpg.add_spacer(width=5)
+            version_text = dpg.add_text(f"Version: {APP_VERSION}")
+            dpg.add_spacer(width=5)
+
+
 
     # Launch
     dpg.show_viewport()

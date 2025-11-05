@@ -31,9 +31,9 @@ from tkinter import filedialog as fd
 from sexpdata import loads, Symbol
 
 # =========================
-# Globals mirrored from original
+# Globals 
 # =========================
-
+APP_VERSION = "v0.1"
 FONT_SIZE = 18
 
 # cache of main symbols already in the project library
