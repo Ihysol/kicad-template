@@ -1,4 +1,5 @@
 import wx
+import wx.dataview as dv
 from pathlib import Path
 import threading
 from gui_core import (
@@ -19,7 +20,6 @@ from gui_core import (
     on_tab_change,
 )
 
-
 # ===============================
 # DearPyGui compatibility shim
 # ===============================
@@ -38,10 +38,19 @@ class DpgShim:
         self.gui.set_value(tag, value)
 
     def get_value(self, tag):
-        val = self._values.get(tag)
-        if val is None:
-            return 0
-        return val
+        # Simulate DPG tags for backend compatibility
+        if tag == "current_path_text":
+            return self._values.get(tag, self.gui.current_folder_txt.GetLabel())
+        if tag == "source_tab_bar":
+            sel = self.gui.notebook.GetSelection()
+            if sel == 0:
+                return "zip_tab"
+            elif sel == 1:
+                return "symbol_tab"
+            elif sel == 2:
+                return "drc_tab"
+            return ""
+        return self._values.get(tag, 0)
 
     def does_item_exist(self, tag):
         return True
@@ -56,11 +65,8 @@ class DpgShim:
             self.gui.append_log(default_value)
         return self.generate_uuid()
 
-    def bind_item_theme(self, *args, **kwargs):
-        pass
-
-    def set_y_scroll(self, *args, **kwargs):
-        pass
+    def bind_item_theme(self, *args, **kwargs): pass
+    def set_y_scroll(self, *args, **kwargs): pass
 
     def generate_uuid(self):
         self._uuid_counter += 1
@@ -87,26 +93,78 @@ class DpgShim:
     def add_button(self, *args, **kwargs): return self.generate_uuid()
     def add_separator(self, *args, **kwargs): return self.generate_uuid()
     def add_child_window(self, *args, **kwargs): return self.generate_uuid()
-    def get_item_label(self, tag): return str(tag)
+    def get_item_label(self, tag):
+        if tag == "symbol_tab": return "Export Project Symbols"
+        if tag == "zip_tab": return "Import ZIP Archives"
+        if tag == "drc_tab": return "DRC Manager"
+        return str(tag)
+
     def get_item_children(self, tag, slot): return []
     def get_item_type(self, tag): return "mvAppItemType::mvCheckbox"
     def set_item_label(self, tag, label): pass
-    
+
     def delete_item(self, tag, children_only=False):
-        """Handle DearPyGui's delete_item() calls."""
-        # Clear the wx log if it's the log container
         if tag == "log_text_container":
             self.gui.clear_log()
-        # Clear ZIP file list when the backend rebuilds it
-        elif tag == "file_checkboxes_container":
-            if hasattr(self.gui, "zip_file_list"):
-                self.gui.zip_file_list.Clear()
-        # Clear symbol list when refreshing symbols
-        elif tag == "symbol_checkboxes_container":
-            if hasattr(self.gui, "symbol_list"):
-                self.gui.symbol_list.Clear()
-        # Otherwise, just ignore silently
 
+    def refresh_symbol_list(self, *args, **kwargs):
+        try:
+            from gui_core import list_project_symbols
+            symbols = list_project_symbols()
+        except Exception:
+            symbols = []
+        if hasattr(self.gui, "symbol_list"):
+            lst = self.gui.symbol_list
+            lst.Clear()
+            for sym in symbols:
+                lst.Append(sym)
+                
+    def _make_status_icon(self, colour: wx.Colour, size=12):
+        """Create a small coloured square bitmap for status indicators."""
+        bmp = wx.Bitmap(size, size)
+        dc = wx.MemoryDC(bmp)
+        dc.SetBrush(wx.Brush(colour))
+        dc.SetPen(wx.TRANSPARENT_PEN)
+        dc.DrawRectangle(0, 0, size, size)
+        dc.SelectObject(wx.NullBitmap)
+        return bmp
+
+    # ----- file/symbol list hooks -----
+    def build_file_list_ui(self, *args, **kwargs):
+        """Populate DataView list with coloured bitmap status icons + text."""
+        try:
+            from gui_core import GUI_FILE_DATA
+        except Exception:
+            return
+
+        lst = self.gui.zip_file_list
+        model = lst.GetStore()
+        model.DeleteAllItems()
+
+        # Map backend statuses to colours + display text
+        status_styles = {
+            "NEW":       (wx.Colour(0, 255, 0),       "NEW"),
+            "PARTIAL":   (wx.Colour(255, 160, 0),    "IN PROJECT"),
+            "ERROR":     (wx.Colour(255, 80, 80),     "ERROR"),
+            "NONE":      (wx.Colour(180, 180, 180),   "MISSING"),
+        }
+
+        for row in GUI_FILE_DATA:
+            name = row.get("name", "unknown.zip")
+            raw_status = row.get("status", "")
+            colour, text = status_styles.get(raw_status, (wx.Colour(180, 180, 180), raw_status or "—"))
+            is_new = raw_status == "NEW"
+
+            icon = self._make_status_icon(colour)
+            icontext = wx.dataview.DataViewIconText(f" {text}", icon)
+            model.AppendItem([is_new, name, icontext])
+
+
+
+    # Hook into gui_ui so backend calls are redirected to wxPython
+    import gui_ui
+    gui_ui.build_file_list_ui = lambda dpg: dpg.build_file_list_ui()
+    gui_ui.refresh_symbol_list = lambda dpg: dpg.refresh_symbol_list()
 
 # ===============================
 # Main GUI Frame
@@ -127,7 +185,7 @@ class MainFrame(wx.Frame):
         self.panel = panel
         vbox = wx.BoxSizer(wx.VERTICAL)
 
-        # --- Folder selection section ---
+        # --- Folder selection ---
         box1 = wx.StaticBox(panel, label="1. Select Archive Folder")
         s1 = wx.StaticBoxSizer(box1, wx.VERTICAL)
         h_buttons = wx.BoxSizer(wx.HORIZONTAL)
@@ -152,27 +210,60 @@ class MainFrame(wx.Frame):
 
         # --- ZIP tab content ---
         self.zip_vbox = wx.BoxSizer(wx.VERTICAL)
-        self.zip_file_list = wx.ListBox(self.tab_zip)
+
+        # === Top controls: Refresh + master checkbox ===
+        h_zip_top = wx.BoxSizer(wx.HORIZONTAL)
+        self.btn_refresh_zips = wx.Button(self.tab_zip, label="Refresh ZIPs")
+        self.chk_master_zip = wx.CheckBox(self.tab_zip, label="Select All")
+        h_zip_top.Add(self.btn_refresh_zips, 0, wx.RIGHT, 8)
+        h_zip_top.Add(self.chk_master_zip, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.zip_vbox.Add(h_zip_top, 0, wx.BOTTOM, 5)
+
+        # === ZIP file list with status ===
+        self.zip_file_list = dv.DataViewListCtrl(
+            self.tab_zip,
+            style=dv.DV_ROW_LINES | dv.DV_VERT_RULES | dv.DV_SINGLE
+        )
+        self.zip_file_list.AppendToggleColumn("", width=40)
+        self.zip_file_list.AppendTextColumn("Archive Name", width=500)
+        self.zip_file_list.AppendIconTextColumn("Status", width=120, align=wx.ALIGN_CENTER)
+        self.zip_vbox.Add(wx.StaticText(self.tab_zip, label="ZIP Archives:"), 0, wx.BOTTOM, 5)
+        self.zip_vbox.Add(self.zip_file_list, 1, wx.EXPAND | wx.BOTTOM, 5)
+
+        # === Import options ===
+        options_box = wx.BoxSizer(wx.VERTICAL)
+        self.chk_use_symbol_name = wx.CheckBox(self.tab_zip, label="Use symbol name as footprint and 3D model name")
+        self.chk_skip_existing = wx.CheckBox(self.tab_zip, label="Skip existing symbols already in project")
+        options_box.Add(self.chk_use_symbol_name, 0, wx.BOTTOM, 3)
+        options_box.Add(self.chk_skip_existing, 0, wx.BOTTOM, 3)
+        self.zip_vbox.Add(options_box, 0, wx.TOP | wx.BOTTOM, 5)
+
+        # === Process / Purge buttons ===
         self.btn_process = wx.Button(self.tab_zip, label="PROCESS / IMPORT")
         self.btn_purge = wx.Button(self.tab_zip, label="PURGE / DELETE")
         h_zip_btns = wx.BoxSizer(wx.HORIZONTAL)
         h_zip_btns.Add(self.btn_process, 0, wx.RIGHT, 8)
         h_zip_btns.Add(self.btn_purge, 0)
-        self.zip_vbox.Add(wx.StaticText(self.tab_zip, label="ZIP Archives:"), 0, wx.BOTTOM, 5)
-        self.zip_vbox.Add(self.zip_file_list, 1, wx.EXPAND | wx.BOTTOM, 5)
         self.zip_vbox.Add(h_zip_btns, 0, wx.TOP, 5)
+
         self.tab_zip.SetSizer(self.zip_vbox)
 
         # --- Symbol tab content ---
         self.sym_vbox = wx.BoxSizer(wx.VERTICAL)
-        self.symbol_list = wx.ListBox(self.tab_symbol)
+        h_sym_top = wx.BoxSizer(wx.HORIZONTAL)
+        self.btn_refresh_symbols = wx.Button(self.tab_symbol, label="Refresh Symbols")
+        self.chk_master_symbols = wx.CheckBox(self.tab_symbol, label="Select All")
+        h_sym_top.Add(self.btn_refresh_symbols, 0, wx.RIGHT, 8)
+        h_sym_top.Add(self.chk_master_symbols, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.sym_vbox.Add(h_sym_top, 0, wx.BOTTOM, 5)
+        self.symbol_list = wx.CheckListBox(self.tab_symbol)
+        self.sym_vbox.Add(wx.StaticText(self.tab_symbol, label="Project Symbols:"), 0, wx.BOTTOM, 5)
+        self.sym_vbox.Add(self.symbol_list, 1, wx.EXPAND | wx.BOTTOM, 5)
         self.btn_export = wx.Button(self.tab_symbol, label="EXPORT SELECTED")
         self.btn_open_output = wx.Button(self.tab_symbol, label="OPEN OUTPUT FOLDER")
         h_sym_btns = wx.BoxSizer(wx.HORIZONTAL)
         h_sym_btns.Add(self.btn_export, 0, wx.RIGHT, 8)
         h_sym_btns.Add(self.btn_open_output, 0)
-        self.sym_vbox.Add(wx.StaticText(self.tab_symbol, label="Project Symbols:"), 0, wx.BOTTOM, 5)
-        self.sym_vbox.Add(self.symbol_list, 1, wx.EXPAND | wx.BOTTOM, 5)
         self.sym_vbox.Add(h_sym_btns, 0, wx.TOP, 5)
         self.tab_symbol.SetSizer(self.sym_vbox)
 
@@ -189,31 +280,107 @@ class MainFrame(wx.Frame):
         vbox.Add(self.gauge, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         vbox.Add(self.log_ctrl, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
+        # --- Footer ---
+        footer_box = wx.BoxSizer(wx.HORIZONTAL)
+        self.btn_author = wx.Button(panel, label="By: Ihysol (Tobias Gent)", style=wx.BU_EXACTFIT)
+        self.btn_author.SetForegroundColour(wx.Colour(150, 150, 255))
+        self.btn_author.SetBackgroundColour(panel.GetBackgroundColour())
+        self.btn_author.SetCursor(wx.Cursor(wx.CURSOR_HAND))
+        footer_box.Add(self.btn_author, 0, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 10)
+        self.btn_issues = wx.Button(panel, label="Report Bug / Suggest Feature", style=wx.BU_EXACTFIT)
+        self.btn_issues.SetForegroundColour(wx.Colour(150, 150, 255))
+        self.btn_issues.SetBackgroundColour(panel.GetBackgroundColour())
+        self.btn_issues.SetCursor(wx.Cursor(wx.CURSOR_HAND))
+        footer_box.Add(self.btn_issues, 0, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 10)
+        self.lbl_version = wx.StaticText(panel, label=f"Version: {APP_VERSION}")
+        footer_box.AddStretchSpacer(1)
+        footer_box.Add(self.lbl_version, 0, wx.ALIGN_CENTER_VERTICAL)
+        vbox.Add(footer_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         panel.SetSizer(vbox)
 
         # --- Bind events ---
+        self.Bind(wx.EVT_BUTTON, lambda e: self.open_url("https://github.com/Ihysol"), self.btn_author)
+        self.Bind(wx.EVT_BUTTON, lambda e: self.open_url("https://github.com/Ihysol/kicad-template"), self.btn_issues)
+        self.Bind(wx.EVT_BUTTON, self.on_refresh_symbols, self.btn_refresh_symbols)
+        self.Bind(wx.EVT_CHECKLISTBOX, self.on_symbol_item_toggled, self.symbol_list)
+        self.Bind(wx.EVT_CHECKBOX, self.on_master_symbols_toggle, self.chk_master_symbols)
+        self.Bind(wx.EVT_BUTTON, self.on_export, self.btn_export)
+        self.Bind(wx.EVT_BUTTON, self.on_open_output, self.btn_open_output)
         self.Bind(wx.EVT_BUTTON, self.on_select_zip_folder, self.btn_select)
         self.Bind(wx.EVT_BUTTON, self.on_open_folder, self.btn_open)
         self.Bind(wx.EVT_BUTTON, self.on_process, self.btn_process)
         self.Bind(wx.EVT_BUTTON, self.on_purge, self.btn_purge)
-        self.Bind(wx.EVT_BUTTON, self.on_export, self.btn_export)
-        self.Bind(wx.EVT_BUTTON, self.on_open_output, self.btn_open_output)
         self.Bind(wx.EVT_BUTTON, self.on_drc_update, self.btn_drc)
+        self.Bind(wx.EVT_BUTTON, self.on_refresh_zips, self.btn_refresh_zips)
+        self.Bind(wx.EVT_CHECKBOX, self.on_master_zip_toggle, self.chk_master_zip)
+        self.zip_file_list.Bind(dv.EVT_DATAVIEW_ITEM_VALUE_CHANGED, self.on_zip_checkbox_changed)
         self.notebook.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self.on_tab_changed)
 
-    # ---------- Backend connection ----------
+    # ---------- Event handlers ----------
+    def open_url(self, url):
+        import webbrowser
+        webbrowser.open_new_tab(url)
+
+    def on_master_zip_toggle(self, event):
+        """Select or deselect all checkboxes in the DataView list."""
+        checked = self.chk_master_zip.IsChecked()
+        model = self.zip_file_list.GetStore()
+        total = model.GetCount()
+
+        # Update all checkbox values
+        for row in range(total):
+            model.SetValueByRow(checked, row, 0)
+
+        # Force the view to repaint (Windows quirk)
+        self.zip_file_list.Refresh()
+
+        # Update label
+        self.chk_master_zip.SetLabel("Deselect All" if checked else "Select All")
+        event.Skip()
+
+
+    def on_zip_checkbox_changed(self, event):
+        model = self.zip_file_list.GetStore()
+        total = model.GetCount()
+        checked = sum(1 for row in range(total) if model.GetValueByRow(row, 0))
+        all_checked = checked == total and total > 0
+        self.chk_master_zip.SetValue(all_checked)
+        self.chk_master_zip.SetLabel("Deselect All" if all_checked else "Select All")
+        event.Skip()
+
+    def on_symbol_item_toggled(self, event):
+        lst = self.symbol_list
+        total = lst.GetCount()
+        checked = sum(1 for i in range(total) if lst.IsChecked(i))
+        all_checked = checked == total and total > 0
+        self.chk_master_symbols.SetValue(all_checked)
+        self.chk_master_symbols.SetLabel("Deselect All" if all_checked else "Select All")
+        event.Skip()
+
+    def on_refresh_symbols(self, event):
+        self.append_log("[INFO] Refreshing symbols...")
+        try:
+            from gui_core import refresh_symbol_list
+            refresh_symbol_list(self.shim)
+            self.append_log("[OK] Symbol list refreshed.")
+        except Exception as e:
+            self.append_log(f"[ERROR] Failed to refresh symbols: {e}")
+
+    def on_refresh_zips(self, event):
+        refresh_file_list(self.shim)
+
+    def on_master_symbols_toggle(self, event):
+        checked = self.chk_master_symbols.IsChecked()
+        lst = self.symbol_list
+        for i in range(lst.GetCount()):
+            lst.Check(i, checked)
+        self.chk_master_symbols.SetLabel("Deselect All" if checked else "Select All")
+        event.Skip()
+
     def set_value(self, tag, value):
         if tag == "current_path_text":
             self.current_folder_txt.SetLabel(value)
         self._values[tag] = value
-
-    def get_value(self, tag):
-        if tag == "current_path_text":
-            return self.current_folder_txt.GetLabel()
-        return self._values.get(tag)
-
-    def has_item(self, tag):
-        return True
 
     def append_log(self, text):
         if "[FAIL]" in text or "[ERROR]" in text:
@@ -231,10 +398,8 @@ class MainFrame(wx.Frame):
         self.log_ctrl.Clear()
 
     def show_section(self, tag, visible: bool):
-        """Optional: control visibility for grouped elements (not needed yet)."""
         pass
 
-    # ---------- Event handlers ----------
     def on_select_zip_folder(self, event):
         show_native_folder_dialog(self.shim)
 
@@ -257,9 +422,81 @@ class MainFrame(wx.Frame):
         update_drc_rules(self.shim)
 
     def on_tab_changed(self, event):
+        """Automatically refresh the correct list when switching tabs."""
+        new_sel = self.notebook.GetSelection()
+        if hasattr(self, "_last_tab") and new_sel == self._last_tab:
+            event.Skip()
+            return
+        self._last_tab = new_sel
+        sel = self.notebook.GetSelection()
+        tab_label = self.notebook.GetPageText(sel)
+
+        if "Import ZIP" in tab_label:
+            self.append_log("[INFO] Refreshing ZIP archive list...")
+            try:
+                refresh_file_list(self.shim)
+                self.append_log("[OK] ZIP archive list refreshed.")
+            except Exception as e:
+                self.append_log(f"[ERROR] Failed to refresh ZIP list: {e}")
+
+        elif "Export Project" in tab_label:
+            self.append_log("[INFO] Refreshing project symbol list...")
+            try:
+                from gui_core import refresh_symbol_list
+                refresh_symbol_list(self.shim)
+                self.append_log("[OK] Project symbol list refreshed.")
+            except Exception as e:
+                self.append_log(f"[ERROR] Failed to refresh symbol list: {e}")
+
+        elif "DRC" in tab_label:
+            self.append_log("[INFO] DRC Manager ready.")
+
+        # Keep original backend behavior
         on_tab_change(self.shim)
         event.Skip()
 
+
+# --- Patch backend ZIP selection handling for DataViewListCtrl ---
+import gui_core
+
+def _wx_get_active_files_for_processing(dpg):
+    """Return checked ZIP paths from DataViewListCtrl."""
+    try:
+        from gui_core import GUI_FILE_DATA
+    except Exception:
+        return []
+
+    gui = getattr(dpg, "gui", None)
+    if not gui or not hasattr(gui, "zip_file_list"):
+        return []
+
+    model = gui.zip_file_list.GetStore()
+    selected_paths = []
+    for i in range(model.GetCount()):
+        checked = model.GetValueByRow(i, 0)
+        if checked and i < len(GUI_FILE_DATA):
+            path = GUI_FILE_DATA[i].get("path")
+            if path:
+                selected_paths.append(path)
+    return selected_paths
+
+gui_core.get_active_files_for_processing = _wx_get_active_files_for_processing
+
+def _wx_collect_selected_symbols_for_export(dpg):
+    """Return checked symbol names using wx.CheckListBox selections."""
+    try:
+        from gui_core import list_project_symbols
+        symbols = list_project_symbols()
+    except Exception:
+        symbols = []
+    gui = getattr(dpg, "gui", None)
+    if not gui or not hasattr(gui, "symbol_list"):
+        return []
+    lst = gui.symbol_list
+    checked = [i for i in range(lst.GetCount()) if lst.IsChecked(i)]
+    return [symbols[i] for i in checked if i < len(symbols)]
+
+gui_core.collect_selected_symbols_for_export = _wx_collect_selected_symbols_for_export
 
 # ===============================
 # wx.App entry
@@ -269,7 +506,6 @@ class KiCadApp(wx.App):
         self.frame = MainFrame()
         self.frame.Show()
         return True
-
 
 if __name__ == "__main__":
     app = KiCadApp(False)
