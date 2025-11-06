@@ -469,9 +469,6 @@ def process_action(dpg, sender, app_data, is_purge: bool):
         if current_folder is not None:
             reload_folder_from_path(dpg, str(current_folder))
     else:
-        logger.error(
-            f"[FAIL] {action_name} FAILED. See output above.",
-        )
         logger.error(f"[FAIL] {action_name} FAILED. See output above.")
 
     logger.info("\n------------------------------------------------------")
@@ -604,15 +601,9 @@ def open_url(dpg, sender, app_data, url: str):
 
     try:
         webbrowser.open_new_tab(url)
-        logger.info(
-            f"Opened URL: {url}",
-            is_cli_output=False,
-        )
+        logger.info(f"Opened URL: {url}")
     except Exception as e:
-        logger.error(
-            f"Failed to open web browser: {e}",
-            is_cli_output=False,
-        )
+        logger.error(f"Failed to open web browser: {e}")
 
 
 def open_folder_in_explorer(dpg, sender=None, app_data=None):
@@ -622,27 +613,18 @@ def open_folder_in_explorer(dpg, sender=None, app_data=None):
     """
     cur_txt = dpg_safe_get_value(dpg, CURRENT_PATH_TAG, "")
     if not cur_txt.startswith("Current Folder: "):
-        logger.error(
-            "Could not determine current folder path.",
-            is_cli_output=False,
-        )
+        logger.error("Could not determine current folder path.")
         return
 
     folder_str = cur_txt.replace("Current Folder: ", "")
 
     if (not folder_str) or folder_str.startswith("("):
-        logger.error(
-            "No valid folder path is currently set.",
-            is_cli_output=False,
-        )
+        logger.error("No valid folder path is currently set.")
         return
 
     folder_path = Path(folder_str)
     if not (folder_path.exists() and folder_path.is_dir()):
-        logger.error(
-            f"Folder path does not exist: {folder_str}",
-            is_cli_output=False,
-        )
+        logger.error(f"Folder path does not exist: {folder_str}")
         return
 
     try:
@@ -653,16 +635,10 @@ def open_folder_in_explorer(dpg, sender=None, app_data=None):
         else:
             subprocess.Popen(["xdg-open", folder_str])
 
-        logger.info(
-            f"Opened folder in explorer: {folder_str}",
-            is_cli_output=False,
-        )
+        logger.info(f"Opened folder in explorer: {folder_str}")
 
     except Exception as e:
-        logger.error(
-            f"Failed to open folder in explorer: {e}",
-            is_cli_output=False,
-        )
+        logger.error(f"Failed to open folder in explorer: {e}")
 
 
 def open_output_folder(dpg, sender=None, app_data=None):
@@ -791,9 +767,7 @@ def initial_load(dpg):
     dpg_safe_set_value(dpg, CURRENT_PATH_TAG, f"Current Folder: {target_folder}")
 
     if not (target_folder.exists() and target_folder.is_dir()):
-        logger.error(
-            f"Input folder not found at '{target_folder}'. Skipping initial load.",
-        )
+        logger.error(f"Input folder not found at '{target_folder}'. Skipping initial load.")
         dpg_safe_set_value(dpg, CURRENT_PATH_TAG, "Current Folder: (Path Error)")
         return
 
@@ -867,9 +841,7 @@ def export_action(dpg, sender=None, app_data=None):
         active_tab_label = ""
 
     if "symbol" not in active_tab_label.lower():
-        logger.warning(
-            "Export is only available in the Project Symbols tab.",
-        )
+        logger.warning("Export is only available in the Project Symbols tab.")
         return
 
     from library_manager import export_symbols
@@ -975,20 +947,14 @@ def export_action(dpg, sender=None, app_data=None):
         )
 
     if not valid_symbols:
-        logger.error(
-            "[FAIL] No valid symbols found (missing or unresolved footprints).",
-        )
+        logger.error("No valid symbols found (missing or unresolved footprints).")
         return
 
     if missing_footprints:
-        logger.warning(
-            f"Missing footprints for: {', '.join(missing_footprints)}",
-        )
+        logger.warning(f"Missing footprints for: {', '.join(missing_footprints)}")
 
     if missing_models:
-        logger.warning(
-            f"Missing 3D models: {', '.join(missing_models)}",
-        )
+        logger.warning(f"Missing 3D models: {', '.join(missing_models)}")
 
     export_paths = export_symbols([entry["symbol"] for entry in valid_symbols])
 
@@ -1002,9 +968,7 @@ def export_action(dpg, sender=None, app_data=None):
                 f"Output directory: {outdir}",
             )
         else:
-            logger.warning(
-                "Could not determine output directory.",
-            )
+            logger.warning("Could not determine output directory.")
     else:
         logger.error("[FAIL] Export returned no files.")
 

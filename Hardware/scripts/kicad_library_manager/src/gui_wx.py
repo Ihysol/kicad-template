@@ -21,6 +21,7 @@ from gui_core import (
     on_tab_change,
     USE_SYMBOLNAME_KEY
 )
+from library_manager import INPUT_ZIP_FOLDER
 
 # ===============================
 # Logging
@@ -79,6 +80,44 @@ class WxGuiLogHandler(logging.Handler):
             wx.CallAfter(self.gui_frame.append_log, msg)
         except Exception:
             pass
+
+
+# ===============================
+# drag & drop feature
+# ===============================
+
+class ZipFileDropTarget(wx.FileDropTarget):
+    """Handles drag-and-drop of .zip archives onto the ZIP list."""
+    def __init__(self, parent_frame):
+        super().__init__()
+        self.parent = parent_frame
+
+    def OnDropFiles(self, x, y, filenames):
+        import shutil
+        from pathlib import Path
+        from gui_core import refresh_file_list
+        from library_manager import INPUT_ZIP_FOLDER
+
+        dropped = []
+        INPUT_ZIP_FOLDER.mkdir(parents=True, exist_ok=True)
+
+        for f in filenames:
+            p = Path(f)
+            if p.is_file() and p.suffix.lower() == ".zip":
+                target = INPUT_ZIP_FOLDER / p.name
+                try:
+                    if target != p:
+                        shutil.copy2(p, target)
+                    dropped.append(target)
+                except Exception as e:
+                    wx.CallAfter(self.parent.append_log, f"[ERROR] Failed to copy {p.name}: {e}")
+
+        if dropped:
+            wx.CallAfter(self.parent.append_log, f"[OK] Added {len(dropped)} ZIP archive(s).")
+            wx.CallAfter(refresh_file_list, self.parent.shim)
+
+        return True
+
 
 
 
@@ -221,7 +260,7 @@ class DpgShim:
 
             icon = self._make_status_icon(colour)
             icontext = wx.dataview.DataViewIconText(f" {text}", icon)
-            model.AppendItem([is_new, name, icontext])
+            model.AppendItem([is_new, name, icontext, "double-click to delete"])
 
 
 
@@ -301,6 +340,11 @@ class MainFrame(wx.Frame):
         self.zip_file_list.AppendToggleColumn("", width=40)
         self.zip_file_list.AppendTextColumn("Archive Name", width=500)
         self.zip_file_list.AppendIconTextColumn("Status", width=120, align=wx.ALIGN_CENTER)
+        self.zip_file_list.AppendTextColumn("Delete", width=80, align=wx.ALIGN_CENTER)
+        self.zip_file_list.SetDropTarget(ZipFileDropTarget(self))
+        self.zip_file_list.Bind(dv.EVT_DATAVIEW_SELECTION_CHANGED, self.on_zip_row_clicked)
+        self.zip_file_list.Bind(dv.EVT_DATAVIEW_ITEM_ACTIVATED, self.on_zip_delete_clicked)
+        
         self.zip_vbox.Add(wx.StaticText(self.tab_zip, label="ZIP Archives:"), 0, wx.BOTTOM, 5)
         self.zip_vbox.Add(self.zip_file_list, 1, wx.EXPAND | wx.BOTTOM, 5)
 
@@ -392,6 +436,71 @@ class MainFrame(wx.Frame):
         self.notebook.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self.on_tab_changed)
 
     # ---------- Event handlers ----------
+    def on_zip_delete_clicked(self, event):
+        """Delete the ZIP file when clicking the Delete column."""
+        item = event.GetItem()
+        if not item.IsOk():
+            return
+
+        model = self.zip_file_list.GetStore()
+        row = model.GetRow(item)
+        if row < 0:
+            return
+
+        col = event.GetColumn()
+        # Delete column index: 3 (0=checkbox,1=name,2=status,3=delete)
+        if col != 3:
+            return
+
+        from gui_core import GUI_FILE_DATA, refresh_file_list
+        from library_manager import INPUT_ZIP_FOLDER
+
+        if row >= len(GUI_FILE_DATA):
+            return
+        path = GUI_FILE_DATA[row]["path"]
+        zip_path = Path(path)
+
+        # Confirm deletion
+        dlg = wx.MessageDialog(
+            self,
+            f"Delete '{zip_path.name}' from the input folder?",
+            "Confirm Delete",
+            wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING,
+        )
+        if dlg.ShowModal() != wx.ID_YES:
+            dlg.Destroy()
+            return
+        dlg.Destroy()
+
+        try:
+            zip_path.unlink(missing_ok=True)
+            self.append_log(f"[OK] Deleted {zip_path.name}")
+        except Exception as e:
+            self.append_log(f"[ERROR] Could not delete {zip_path.name}: {e}")
+            return
+
+        # Refresh list immediately
+        refresh_file_list(self.shim)
+
+    
+    def on_zip_row_clicked(self, event):
+        """Toggle checkbox immediately when clicking any cell in the row."""
+        selections = self.zip_file_list.GetSelections()
+        if not selections:
+            return
+        model = self.zip_file_list.GetStore()
+        item = selections[0]
+        row = model.GetRow(item)
+        if row < 0:
+            return
+
+        # toggle value
+        current = model.GetValueByRow(row, 0)
+        model.SetValueByRow(not current, row, 0)
+        self.zip_file_list.Refresh()  # force visual update immediately
+
+        # update master checkbox status
+        self.on_zip_checkbox_changed(None)
     
     def on_use_symbol_name_toggled(self, event):
         """Save preference to backend config."""
@@ -430,7 +539,9 @@ class MainFrame(wx.Frame):
         all_checked = checked == total and total > 0
         self.chk_master_zip.SetValue(all_checked)
         self.chk_master_zip.SetLabel("Deselect All" if all_checked else "Select All")
-        event.Skip()
+        if event:
+            event.Skip()
+
 
     def on_symbol_item_toggled(self, event):
         lst = self.symbol_list
@@ -439,7 +550,8 @@ class MainFrame(wx.Frame):
         all_checked = checked == total and total > 0
         self.chk_master_symbols.SetValue(all_checked)
         self.chk_master_symbols.SetLabel("Deselect All" if all_checked else "Select All")
-        event.Skip()
+        if event:
+            event.Skip()
 
     def on_refresh_symbols(self, event):
         self.append_log("[INFO] Refreshing symbols...")
@@ -459,7 +571,8 @@ class MainFrame(wx.Frame):
         for i in range(lst.GetCount()):
             lst.Check(i, checked)
         self.chk_master_symbols.SetLabel("Deselect All" if checked else "Select All")
-        event.Skip()
+        if event:
+            event.Skip()
 
     def set_value(self, tag, value):
         if tag == "use_symbol_name_chkbox":
