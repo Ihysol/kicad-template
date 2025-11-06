@@ -4,28 +4,6 @@ from pathlib import Path
 import threading
 import sys
 
-
-# ===============================
-# Logging
-# ===============================
-import logging
-
-logger = logging.getLogger("kicad_library_manager")
-logger.setLevel(logging.DEBUG)
-
-# --- Add console handler (if not already present) ---
-if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.DEBUG)
-    console_handler.setFormatter(
-        logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S")
-    )
-    logger.addHandler(console_handler)
-
-# Don't let logs bubble up to root logger (avoids duplicates)
-logger.propagate = False
-
-
 from gui_core import (
     APP_VERSION,
     load_config,
@@ -44,6 +22,51 @@ from gui_core import (
     USE_SYMBOLNAME_KEY
 )
 
+# ===============================
+# Logging
+# ===============================
+import logging
+
+# --- Ensure sys.stdout/stderr exist (important for PyInstaller GUI builds) ---
+if not hasattr(sys, "stdout") or sys.stdout is None:
+    class DevNull:
+        def write(self, *_): pass
+        def flush(self): pass
+    sys.stdout = DevNull()
+    sys.stderr = DevNull()
+
+logger = logging.getLogger("kicad_library_manager")
+logger.setLevel(logging.DEBUG)
+
+# --- Formatter with auto-clean for duplicate prefixes ---
+class CleanFormatter(logging.Formatter):
+    def format(self, record):
+        msg = record.getMessage()
+        # Strip manually embedded tags like [INFO] [DEBUG]
+        for tag in ("[INFO]", "[DEBUG]", "[WARN]", "[ERROR]", "[OK]"):
+            msg = msg.replace(tag, "").strip()
+        record.message = msg
+        return super().format(record)
+
+formatter = CleanFormatter("%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S")
+
+# --- Console handler (for debug mode or when running via python gui_wx.py) ---
+if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.DEBUG)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+# --- Remove broken handlers (from PyInstaller --noconsole builds) ---
+for h in list(logger.handlers):
+    if isinstance(h, logging.StreamHandler) and getattr(h.stream, "write", None) is None:
+        logger.removeHandler(h)
+
+# --- Do not propagate logs to root (prevents duplication) ---
+logger.propagate = False
+
+
+# --- GUI Log handler (later attached to wx.TextCtrl in MainFrame) ---
 class WxGuiLogHandler(logging.Handler):
     """Custom logging handler that forwards logs into wx TextCtrl."""
     def __init__(self, gui_frame):
@@ -52,13 +75,11 @@ class WxGuiLogHandler(logging.Handler):
 
     def emit(self, record):
         try:
-            # Format only the message part — not the timestamp twice
-            clean_msg = record.getMessage()
-            prefix = f"{record.asctime if hasattr(record, 'asctime') else ''}"
-            formatted = f"{record.levelname}: {clean_msg}" if record.levelno != logging.INFO else clean_msg
-            wx.CallAfter(self.gui_frame.append_log, formatted)
+            msg = formatter.format(record)
+            wx.CallAfter(self.gui_frame.append_log, msg)
         except Exception:
             pass
+
 
 
 # ===============================
