@@ -31,6 +31,12 @@ from tkinter import filedialog as fd
 from sexpdata import loads, Symbol
 
 # =========================
+# Logging 
+# =========================
+import logging
+logger = logging.getLogger("kicad_library_manager")
+
+# =========================
 # Globals 
 # =========================
 APP_VERSION = "v0.1"
@@ -93,8 +99,7 @@ def save_config(key: str, value: Any) -> None:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=4)
     except Exception as e:
-        print(f"ERROR: Could not save configuration to {CONFIG_FILE.name}: {e}")
-
+        logger.error(f"Could not save configuration to {CONFIG_FILE.name}: {e}")
 
 # ---------------------------
 # Library-manager hooks
@@ -152,68 +157,10 @@ def dpg_safe_item_label(dpg, tag: str, fallback: str = "") -> str:
 
 
 # ---------------------------
-# LOGGING (uses DearPyGui at runtime)
+# LOGGING (standard Python logging only)
 # ---------------------------
-
-
-def log_message(
-    dpg,
-    sender,
-    app_data,
-    user_data: str,
-    add_timestamp: bool = True,
-    is_cli_output: bool = False,
-):
-    """
-    Append a line to:
-    - the scrolling GUI log (colored input_text rows)
-    - the full_log_history buffer (plain text)
-    Behavior unchanged from original.
-    """
-    global full_log_history
-
-    if not user_data:
-        if dpg.does_item_exist(LOG_TEXT_TAG):
-            dpg.add_text(" ", parent=LOG_TEXT_TAG, tag=dpg.generate_uuid())
-        full_log_history.append("")
-        return
-
-    log_entry_full = user_data
-    if add_timestamp:
-        ts = datetime.now().strftime("[%H:%M:%S]")
-        log_entry_full = f"{ts} {user_data}"
-
-    full_log_history.append(log_entry_full)
-
-    # pick theme based on content
-    theme_tag = "default_log_theme"
-    upper = log_entry_full.upper()
-    if is_cli_output:
-        theme_tag = "cli_output_theme"
-    elif "[FAIL]" in upper or "[ERROR]" in upper or "CRITICAL ERROR" in upper:
-        theme_tag = "error_log_theme"
-    elif "[OK]" in upper or "[SUCCESS]" in upper:
-        theme_tag = "success_log_theme"
-
-    # show line in GUI log pane
-    if dpg.does_item_exist(LOG_TEXT_TAG):
-        new_item = dpg.add_input_text(
-            default_value=log_entry_full,
-            parent=LOG_TEXT_TAG,
-            readonly=True,
-            width=-1,
-            tag=dpg.generate_uuid(),
-        )
-        dpg.bind_item_theme(new_item, theme_tag)
-
-    # bump scroll flag (UI will auto-scroll)
-    if dpg.does_item_exist(SCROLL_FLAG_TAG):
-        cur = dpg.get_value(SCROLL_FLAG_TAG)
-        dpg.set_value(SCROLL_FLAG_TAG, cur + 1)
-
-    if dpg.does_item_exist(LOG_WINDOW_CHILD_TAG):
-        dpg.set_y_scroll(LOG_WINDOW_CHILD_TAG, -1.0)
-
+logger = logging.getLogger("kicad_library_manager")
+logger.setLevel(logging.DEBUG)
 
 def clear_log(dpg, sender=None, app_data=None):
     """Wipe log window + buffer and re-seed standard messages."""
@@ -221,8 +168,8 @@ def clear_log(dpg, sender=None, app_data=None):
     if dpg.does_item_exist(LOG_TEXT_TAG):
         dpg.delete_item(LOG_TEXT_TAG, children_only=True)
     full_log_history.clear()
-    log_message(dpg, None, None, "Log cleared.", add_timestamp=True)
-    log_message(dpg, None, None, "Ready.", add_timestamp=True)
+    logger.info("Log cleared.", add_timestamp=True)
+    logger.info("Ready.", add_timestamp=True)
 
 
 def show_full_log_popup(dpg, sender=None, app_data=None):
@@ -282,7 +229,7 @@ def list_project_symbols() -> List[str]:
         with open(PROJECT_SYMBOL_LIB, "r", encoding="utf-8") as f:
             sexp = loads(f.read())
     except Exception as e:
-        print(f"ERROR reading symbol library: {e}")
+        logger.error(f"[ERROR] reading symbol library: {e}")
         return []
 
     symbols: List[str] = []
@@ -295,30 +242,23 @@ def list_project_symbols() -> List[str]:
     return symbols
 
 
+_last_cache_count = None  # place this at module level (top of gui_core.py)
+
 def update_existing_symbols_cache(dpg):
     """
     Refresh PROJECT_EXISTING_SYMBOLS via library_manager.get_existing_main_symbols()
-    and emit a log line.
     """
-    global PROJECT_EXISTING_SYMBOLS
+    global PROJECT_EXISTING_SYMBOLS, _last_cache_count
     try:
         PROJECT_EXISTING_SYMBOLS = get_existing_main_symbols()
-        log_message(
-            dpg,
-            None,
-            None,
-            f"INFO: Updated existing symbol cache with {len(PROJECT_EXISTING_SYMBOLS)} symbols.",
-            is_cli_output=False,
-        )
+        new_count = len(PROJECT_EXISTING_SYMBOLS)
+        if new_count != _last_cache_count:
+            logger.info(f"Updated existing symbol cache with {new_count} symbols.")
+            _last_cache_count = new_count
     except Exception as e:
         PROJECT_EXISTING_SYMBOLS = set()
-        log_message(
-            dpg,
-            None,
-            None,
-            f"[ERROR] Failed to load existing symbols: {e}",
-            is_cli_output=False,
-        )
+        logger.error(f"Failed to load existing symbols: {e}")
+
 
 
 # ---------------------------
@@ -478,7 +418,7 @@ def process_action(dpg, sender, app_data, is_purge: bool):
 
     active_files = get_active_files_for_processing(dpg)
     if not active_files:
-        log_message(dpg, None, None, "ERROR: No active ZIP files selected for action.")
+        logger.error("No active ZIP files selected for action.")
         return
 
     # --------------------------
@@ -502,27 +442,12 @@ def process_action(dpg, sender, app_data, is_purge: bool):
     # Log state
     # --------------------------
     action_name = "PURGE" if is_purge else "PROCESS"
-    log_message(
-        dpg,
-        None,
-        None,
-        f"--- Initiating {action_name} for {len(active_files)} active file(s) ---",
-    )
+    logger.info(f"--- Initiating {action_name} for {len(active_files)} active file(s) ---")
 
     if not is_purge:
         if rename_assets:
-            log_message(
-                dpg,
-                None,
-                None,
-                "INFO: Renaming of Footprints/3D Models is ENABLED.",
-            )
-        log_message(
-            dpg,
-            None,
-            None,
-            f"INFO: Use symbol name as footprint/3D model name: {use_symbolname_as_ref}",
-        )
+            logger.info("Renaming of Footprints/3D Models is ENABLED.")
+        logger.info(f"Use symbol name as footprint/3D model name: {use_symbolname_as_ref}")
 
     # --------------------------
     # Execute CLI logic (unchanged)
@@ -534,39 +459,22 @@ def process_action(dpg, sender, app_data, is_purge: bool):
         use_symbol_name=use_symbolname_as_ref,
     )
 
-
-    # mirror CLI output into GUI log
     for line in output.splitlines():
-        log_message(dpg, None, None, line, add_timestamp=False, is_cli_output=True)
+        logger.info(line)
 
     if ok:
-        log_message(
-            dpg,
-            None,
-            None,
-            f"[OK] {action_name} SUCCESSFUL. Refreshing display...",
-        )
+        logger.info(f"\n{action_name} SUCCESSFUL. Refreshing display...")
         update_existing_symbols_cache(dpg)
         current_folder = get_current_folder_path(dpg)
         if current_folder is not None:
             reload_folder_from_path(dpg, str(current_folder))
     else:
-        log_message(
-            dpg,
-            None,
-            None,
+        logger.error(
             f"[FAIL] {action_name} FAILED. See output above.",
         )
+        logger.error(f"[FAIL] {action_name} FAILED. See output above.")
 
-    log_message(
-        dpg,
-        None,
-        None,
-        "------------------------------------------------------",
-        add_timestamp=False,
-    )
-    log_message(dpg, None, None, "", add_timestamp=False)
-
+    logger.info("\n------------------------------------------------------")
 
 
 # ---------------------------
@@ -591,10 +499,10 @@ def update_drc_rules(dpg, sender=None, app_data=None):
                 break
 
         if not pcb:
-            log_message(dpg, None, None, "[FAIL] No .kicad_pcb file found.")
+            logger.error("[ERROR] No .kicad_pcb file found.")
             return
 
-        log_message(dpg, None, None, f"Found PCB file: {pcb.name}")
+        logger.info(f"Found PCB file: {pcb.name}")
 
         # Step 2: parse layers
         with open(pcb, "r", encoding="utf-8") as f:
@@ -607,9 +515,7 @@ def update_drc_rules(dpg, sender=None, app_data=None):
                 break
 
         if not layers_block:
-            log_message(
-                dpg, None, None, "[FAIL] No (layers ...) block found in PCB file."
-            )
+            logger.error("[ERROR] No (layers ...) block found in PCB file.")
             return
 
         copper_layers = [
@@ -620,7 +526,7 @@ def update_drc_rules(dpg, sender=None, app_data=None):
             and str(layer[1]).endswith(".Cu")
         ]
         layer_count = len(copper_layers)
-        log_message(dpg, None, None, f"🧩 Detected {layer_count} copper layers")
+        logger.info("Detected {layer_count} copper layers.")
 
         # Step 3: find dru_templates folder
         dru_template_dir = None
@@ -631,7 +537,7 @@ def update_drc_rules(dpg, sender=None, app_data=None):
                 break
 
         if not dru_template_dir:
-            log_message(dpg, None, None, "[FAIL] No 'dru_templates' folder found.")
+            logger.error("[ERROR] No 'dru_templates' folder found.")
             return
 
         src = None
@@ -640,12 +546,7 @@ def update_drc_rules(dpg, sender=None, app_data=None):
             break
 
         if not src or not src.exists():
-            log_message(
-                dpg,
-                None,
-                None,
-                f"[FAIL] No template found for {layer_count} layers.",
-            )
+            logger.error(f"[ERROR] No template found for {layer_count} layers.")
             return
 
         # Step 4: find Project.kicad_dru
@@ -660,11 +561,11 @@ def update_drc_rules(dpg, sender=None, app_data=None):
 
         # Step 5: copy + log
         shutil.copyfile(src, dst)
-        log_message(dpg, None, None, f"[OK] Applied {src.name} -> {dst.name}")
-        log_message(dpg, None, None, "[SUCCESS] DRC updated successfully.")
+        logger.info(f"Applied {src.name} -> {dst.name}")
+        logger.info("[SUCCESS] DRC updated successfully.")
 
     except Exception as e:
-        log_message(dpg, None, None, f"[FAIL] DRC update failed: {e}")
+        logger.error(f"[FAIL] DRC update failed: {e}")
 
 
 # ---------------------------
@@ -703,19 +604,13 @@ def open_url(dpg, sender, app_data, url: str):
 
     try:
         webbrowser.open_new_tab(url)
-        log_message(
-            dpg,
-            None,
-            None,
-            f"INFO: Opened URL: {url}",
+        logger.info(
+            f"Opened URL: {url}",
             is_cli_output=False,
         )
     except Exception as e:
-        log_message(
-            dpg,
-            None,
-            None,
-            f"ERROR: Failed to open web browser: {e}",
+        logger.error(
+            f"Failed to open web browser: {e}",
             is_cli_output=False,
         )
 
@@ -727,11 +622,8 @@ def open_folder_in_explorer(dpg, sender=None, app_data=None):
     """
     cur_txt = dpg_safe_get_value(dpg, CURRENT_PATH_TAG, "")
     if not cur_txt.startswith("Current Folder: "):
-        log_message(
-            dpg,
-            None,
-            None,
-            "ERROR: Could not determine current folder path.",
+        logger.error(
+            "Could not determine current folder path.",
             is_cli_output=False,
         )
         return
@@ -739,22 +631,16 @@ def open_folder_in_explorer(dpg, sender=None, app_data=None):
     folder_str = cur_txt.replace("Current Folder: ", "")
 
     if (not folder_str) or folder_str.startswith("("):
-        log_message(
-            dpg,
-            None,
-            None,
-            "ERROR: No valid folder path is currently set.",
+        logger.error(
+            "No valid folder path is currently set.",
             is_cli_output=False,
         )
         return
 
     folder_path = Path(folder_str)
     if not (folder_path.exists() and folder_path.is_dir()):
-        log_message(
-            dpg,
-            None,
-            None,
-            f"ERROR: Folder path does not exist: {folder_str}",
+        logger.error(
+            f"Folder path does not exist: {folder_str}",
             is_cli_output=False,
         )
         return
@@ -767,20 +653,14 @@ def open_folder_in_explorer(dpg, sender=None, app_data=None):
         else:
             subprocess.Popen(["xdg-open", folder_str])
 
-        log_message(
-            dpg,
-            None,
-            None,
-            f"INFO: Opened folder in explorer: {folder_str}",
+        logger.info(
+            f"Opened folder in explorer: {folder_str}",
             is_cli_output=False,
         )
 
     except Exception as e:
-        log_message(
-            dpg,
-            None,
-            None,
-            f"ERROR: Failed to open folder in explorer: {e}",
+        logger.error(
+            f"Failed to open folder in explorer: {e}",
             is_cli_output=False,
         )
 
@@ -801,7 +681,7 @@ def open_output_folder(dpg, sender=None, app_data=None):
         dpg_safe_set_value(dpg, CURRENT_PATH_TAG, prev_val)
 
     except Exception as e:
-        log_message(dpg, None, None, f"ERROR: Could not open output folder: {e}")
+        logger.error(f"Could not open output folder: {e}")
 
 
 def get_current_folder_path(dpg) -> Path | None:
@@ -825,9 +705,9 @@ def refresh_file_list(dpg, sender=None, app_data=None):
     """
     folder = get_current_folder_path(dpg)
     if folder is None:
-        log_message(dpg, None, None, "ERROR: Cannot refresh. Current path is invalid.")
+        logger.error("Cannot refresh. Current path is invalid.")
         return
-    log_message(dpg, None, None, f"Manually refreshing file list for: {folder}")
+    logger.info(f"Manually refreshing file list for: {folder}")
     reload_folder_from_path(dpg, str(folder))
 
 
@@ -838,16 +718,13 @@ def show_native_folder_dialog(dpg, sender=None, app_data=None):
     """
     paths = select_zip_folder(initial_dir=get_current_folder_path(dpg))
     if not paths:
-        log_message(
-            dpg,
-            None,
-            None,
+        logger.info(
             "Folder selection cancelled or no ZIP files found. Retaining current folder view.",
         )
         return
 
     picked_folder = str(paths[0].parent.resolve())
-    log_message(dpg, None, None, f"Found {len(paths)} ZIP file(s).")
+    logger.info(f"Found {len(paths)} ZIP file(s).")
     reload_folder_from_path(dpg, picked_folder)
 
 
@@ -864,7 +741,7 @@ def reload_folder_from_path(dpg, folder_path_str: str):
 
     folder_path = Path(folder_path_str).resolve()
     if not folder_path.exists() or not folder_path.is_dir():
-        log_message(dpg, None, None, f"ERROR: Folder not found at '{folder_path}'.")
+        logger.error(f"Folder not found at '{folder_path}'.")
         check_zip_for_existing_symbols([])
         build_file_list_ui(dpg)
         return
@@ -892,7 +769,7 @@ def reload_folder_from_path(dpg, folder_path_str: str):
         build_file_list_ui(dpg)
 
     except Exception as e:
-        log_message(dpg, None, None, f"ERROR scanning folder: {e}")
+        logger.error(f"ERROR scanning folder: {e}")
         check_zip_for_existing_symbols([])
         build_file_list_ui(dpg)
 
@@ -914,37 +791,31 @@ def initial_load(dpg):
     dpg_safe_set_value(dpg, CURRENT_PATH_TAG, f"Current Folder: {target_folder}")
 
     if not (target_folder.exists() and target_folder.is_dir()):
-        log_message(
-            dpg,
-            None,
-            None,
-            f"ERROR: Input folder not found at '{target_folder}'. Skipping initial load.",
+        logger.error(
+            f"Input folder not found at '{target_folder}'. Skipping initial load.",
         )
         dpg_safe_set_value(dpg, CURRENT_PATH_TAG, "Current Folder: (Path Error)")
         return
 
-    log_message(dpg, None, None, f"Checking default folder: '{target_folder}'")
+    logger.info(f"Checking default folder: '{target_folder}'")
 
     try:
         zips_here = list(target_folder.glob("*.zip"))
         valid_paths = [p for p in zips_here if p.exists()]
     except Exception as e:
-        log_message(dpg, None, None, f"ERROR scanning folder: {e}")
+        logger.error(f"ERROR scanning folder: {e}")
         valid_paths = []
 
     check_zip_for_existing_symbols(valid_paths)
 
     if valid_paths:
-        log_message(
-            dpg,
-            None,
-            None,
+        logger.info(
             f"Successfully loaded {len(valid_paths)} ZIP file(s) from default path.",
         )
         if dpg.does_item_exist("zip_action_group"):
             dpg.show_item("zip_action_group")
     else:
-        log_message(dpg, None, None, "No ZIP files found in the default folder.")
+        logger.error("No ZIP files found in the default folder.")
         if dpg.does_item_exist("zip_action_group"):
             dpg.hide_item("zip_action_group")
 
@@ -996,11 +867,8 @@ def export_action(dpg, sender=None, app_data=None):
         active_tab_label = ""
 
     if "symbol" not in active_tab_label.lower():
-        log_message(
-            dpg,
-            None,
-            None,
-            "[WARN] Export is only available in the Project Symbols tab.",
+        logger.warning(
+            "Export is only available in the Project Symbols tab.",
         )
         return
 
@@ -1008,7 +876,7 @@ def export_action(dpg, sender=None, app_data=None):
 
     selected_symbols = collect_selected_symbols_for_export(dpg)
     if not selected_symbols:
-        log_message(dpg, None, None, "[WARN] No symbols selected for export.")
+        logger.warning("No symbols selected for export.")
         return
 
     # Parse ProjectSymbols.kicad_sym
@@ -1016,7 +884,7 @@ def export_action(dpg, sender=None, app_data=None):
         with open(PROJECT_SYMBOL_LIB, "r", encoding="utf-8") as f:
             sexp = loads(f.read())
     except Exception as e:
-        log_message(dpg, None, None, f"[FAIL] Could not read symbol library: {e}")
+        logger.error(f"[FAIL] Could not read symbol library: {e}")
         return
 
     # Build {symbol_name: footprint_name}
@@ -1100,70 +968,45 @@ def export_action(dpg, sender=None, app_data=None):
                 else:
                     missing_models.append(str(m))
 
-        if resolved_models:
-            log_message(
-                dpg,
-                None,
-                None,
-                f"[INFO] Found {len(resolved_models)} 3D file(s) for {sym}: "
-                + ", ".join(m.name for m in resolved_models),
-            )
+        logger.info(f"Found {len(resolved_models)} 3D file(s) for {sym}: " + ", ".join(m.name for m in resolved_models))
 
         valid_symbols.append(
             {"symbol": sym, "footprint": found_fp, "models": resolved_models}
         )
 
     if not valid_symbols:
-        log_message(
-            dpg,
-            None,
-            None,
+        logger.error(
             "[FAIL] No valid symbols found (missing or unresolved footprints).",
         )
         return
 
     if missing_footprints:
-        log_message(
-            dpg,
-            None,
-            None,
-            f"[WARN] Missing footprints for: {', '.join(missing_footprints)}",
+        logger.warning(
+            f"Missing footprints for: {', '.join(missing_footprints)}",
         )
 
     if missing_models:
-        log_message(
-            dpg,
-            None,
-            None,
-            f"[WARN] Missing 3D models: {', '.join(missing_models)}",
+        logger.warning(
+            f"Missing 3D models: {', '.join(missing_models)}",
         )
 
     export_paths = export_symbols([entry["symbol"] for entry in valid_symbols])
 
     if export_paths:
-        log_message(
-            dpg,
-            None,
-            None,
-            f"[OK] Exported {len(export_paths)} ZIP file(s) successfully.",
+        logger.info(
+            f"Exported {len(export_paths)} ZIP file(s) successfully.",
         )
         outdir = export_paths[0].parent if hasattr(export_paths[0], "parent") else None
         if outdir:
-            log_message(
-                dpg,
-                None,
-                None,
-                f"[OK] Output directory: {outdir}",
+            logger.info(
+                f"Output directory: {outdir}",
             )
         else:
-            log_message(
-                dpg,
-                None,
-                None,
-                "[WARN] Could not determine output directory.",
+            logger.warning(
+                "Could not determine output directory.",
             )
     else:
-        log_message(dpg, None, None, "[FAIL] Export returned no files.")
+        logger.error("[FAIL] Export returned no files.")
 
 
 # ---------------------------
@@ -1177,13 +1020,11 @@ def toggle_selection_mode(dpg, container_tag: str, btn_tag: str):
     Behavior unchanged, just parameterized.
     """
     if not (container_tag and btn_tag):
-        log_message(
-            dpg, None, None, "[WARN] Invalid toggle_selection_mode call (missing args)."
-        )
+        logger.warning("Invalid toggle_selection_mode call (missing args).")
         return
 
     if not dpg.does_item_exist(container_tag):
-        log_message(dpg, None, None, f"[WARN] Container '{container_tag}' not found.")
+        logger.warning(f"Container '{container_tag}' not found.")
         return
 
     btn_label = dpg.get_item_label(btn_tag)
@@ -1205,7 +1046,7 @@ def toggle_selection_mode(dpg, container_tag: str, btn_tag: str):
 
     boxes = walk_checkboxes(container_tag)
     if not boxes:
-        log_message(dpg, None, None, "[WARN] No checkboxes found to toggle.")
+        logger.warning("No checkboxes found to toggle.")
         return
 
     for cb in boxes:
@@ -1213,10 +1054,7 @@ def toggle_selection_mode(dpg, container_tag: str, btn_tag: str):
 
     dpg.set_item_label(btn_tag, "Deselect All" if select_mode else "Select All")
 
-    log_message(
-        dpg,
-        None,
-        None,
+    logger.info(
         f"{'Selected' if select_mode else 'Deselected'} {len(boxes)} items in {container_tag}.",
     )
 
@@ -1230,7 +1068,7 @@ def on_tab_change(dpg, sender=None, app_data=None, user_data=None):
     try:
         active_tab = dpg.get_item_label(dpg.get_value("source_tab_bar"))
     except Exception:
-        log_message(dpg, None, None, "[WARN] Could not detect active tab.")
+        logger.warning("Could not detect active tab.")
         return
 
     active = active_tab.lower().strip()
@@ -1240,7 +1078,7 @@ def on_tab_change(dpg, sender=None, app_data=None, user_data=None):
             dpg.show_item("zip_action_group")
         if dpg.does_item_exist("symbol_action_group"):
             dpg.hide_item("symbol_action_group")
-        log_message(dpg, None, None, "[INFO] Switched to ZIP Archives tab.")
+        logger.info("Switched to ZIP Archives tab.")
 
     elif "symbol" in active or "export" in active:
         if dpg.does_item_exist("zip_action_group"):
@@ -1251,18 +1089,18 @@ def on_tab_change(dpg, sender=None, app_data=None, user_data=None):
         from gui_ui import refresh_symbol_list
 
         refresh_symbol_list(dpg)
-        log_message(dpg, None, None, "[INFO] Switched to Project Symbols tab.")
+        logger.info("Switched to Project Symbols tab.")
 
     elif "drc" in active:
         if dpg.does_item_exist("zip_action_group"):
             dpg.hide_item("zip_action_group")
         if dpg.does_item_exist("symbol_action_group"):
             dpg.hide_item("symbol_action_group")
-        log_message(dpg, None, None, "[INFO] Switched to DRC Manager tab.")
+        logger.info("Switched to DRC Manager tab.")
 
     else:
         if dpg.does_item_exist("zip_action_group"):
             dpg.hide_item("zip_action_group")
         if dpg.does_item_exist("symbol_action_group"):
             dpg.hide_item("symbol_action_group")
-        log_message(dpg, None, None, "[WARN] Unknown tab selected.")
+        logger.warning("#Unknown tab selected.")

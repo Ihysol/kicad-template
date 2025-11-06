@@ -13,6 +13,12 @@ from datetime import datetime
 from dotenv import load_dotenv
 from sexpdata import loads, dumps, Symbol
 
+# ==========
+# Logger
+# ==========
+import logging
+logger = logging.getLogger("kicad_library_manager")
+
 # ---------------------------------------------------------------------------------
 # Constants / schema markers
 # ---------------------------------------------------------------------------------
@@ -83,10 +89,10 @@ def detect_project_version(start_path: Path) -> int:
                 ):
                     ver = str(node[1]).strip('"')
                     schema = major_to_schema(ver)
-                    print(f"[DEBUG] Detected generator_version {ver} → schema {schema}")
+                    logger.debug(f"Detectegenerator_version {ver} → schema {schema}")
                     return schema
         except Exception as e:
-            print(f"[WARN] Failed to parse {sch_file.name} for generator_version: {e}")
+            logger.warning(f"Failed to parse {sch_file.name} for generator_version: {e}")
 
     for pattern in ["*.kicad_pro", "*.kicad_pcb"]:
         proj_file = find_upward(pattern, start_path)
@@ -101,12 +107,12 @@ def detect_project_version(start_path: Path) -> int:
                         and (node[0] == Symbol("version") or node[0] == "version")
                     ):
                         ver_val = int(node[1])
-                        print(f"[DEBUG] Detected version {ver_val} from {proj_file.name}")
+                        logger.debug(f"Detected version {ver_val} from {proj_file.name}")
                         return ver_val
             except Exception as e:
-                print(f"[WARN] Failed to parse {proj_file.name} for version: {e}")
+                logger.warning(f"Failed to parse {proj_file.name} for version: {e}")
 
-    print("[WARN] Could not detect KiCad version; defaulting to KiCad 8 (20221018).")
+    logger.warning("Could not detect KiCad version; defaulting to KiCad 8 (20221018).")
     return KICAD8_SCHEMA
 
 
@@ -122,7 +128,7 @@ def list_symbols_simple(sym_file: Path, print_list: bool = True) -> list[str]:
     """
     if not sym_file.exists():
         if print_list:
-            print(f"File not found: {sym_file.name}")
+            logger.warning(f"File not found: {sym_file.name}")
         return []
 
     try:
@@ -130,7 +136,7 @@ def list_symbols_simple(sym_file: Path, print_list: bool = True) -> list[str]:
             sexp_list = loads(f.read())
     except Exception as e:
         if print_list:
-            print(f"ERROR: Failed to parse S-expression in {sym_file.name}: {e}")
+            logger.error(f"ERROR: Failed to parse S-expression in {sym_file.name}: {e}")
         return []
 
     symbols: list[str] = []
@@ -145,8 +151,8 @@ def list_symbols_simple(sym_file: Path, print_list: bool = True) -> list[str]:
                 symbols.append(symbol_name)
 
     if print_list:
-        print(f"Found {len(symbols)} (main) symbols in {sym_file.name}:")
-        print(", ".join(symbols) if symbols else "No main symbols found.")
+        logger.info(f"Found {len(symbols)} (main) symbols in {sym_file.name}:")
+        logger.info(", ".join(symbols) if symbols else "No main symbols found.")
 
     return symbols
 
@@ -453,7 +459,7 @@ def ensure_project_symbol_header(project_sym_path: Path, project_version: int):
         with open(project_sym_path, "r", encoding="utf-8") as f:
             sexpr = loads(f.read())
     except Exception as e:
-        print(f"[WARN] Failed to parse {project_sym_path.name} for header update: {e}")
+        logger.warning(f"Failed to parse {project_sym_path.name} for header update: {e}")
         return
     if not isinstance(sexpr, list) or not sexpr:
         return
@@ -485,9 +491,9 @@ def ensure_project_symbol_header(project_sym_path: Path, project_version: int):
                     pretty_print=True,
                 )
             )
-        print(f"[INFO] Updated header in {project_sym_path.name} → schema {target_schema}")
+        logger.info(f"Updated header in {project_sym_path.name} → schema {target_schema}")
     except Exception as e:
-        print(f"[WARN] Could not write updated header for {project_sym_path.name}: {e}")
+        logger.warning(f"Could not write updated header for {project_sym_path.name}: {e}")
 
 
 def append_symbols_from_file(src_sym_file: Path, rename_assets=False):
@@ -526,17 +532,17 @@ def append_symbols_from_file(src_sym_file: Path, rename_assets=False):
 
         project_version = detect_project_version(PROJECT_DIR)
         src_sexp = normalize_expr_for_project(src_sexp, project_version)
-        print(f"[INFO] Cleaned {src_sym_file.name} for KiCad schema {project_version}")
+        logger.info(f"Cleaned {src_sym_file.name} for KiCad schema {project_version}")
 
         # Automatically remove illegal UUIDs for KiCad 9
         if project_version >= KICAD9_SCHEMA:
             _remove_top_uuid(src_sexp)
 
     except FileNotFoundError:
-        print(f"[ERROR] Source file not found: {src_sym_file.name}")
+        logger.error(f"[ERROR] Source file not found: {src_sym_file.name}")
         return False
     except Exception as e:
-        print(f"[ERROR] Parsing S-expression in {src_sym_file.name}: {e}")
+        logger.error(f"[ERROR] Parsing S-expression in {src_sym_file.name}: {e}")
         return False
 
     symbols_to_append = []
@@ -575,12 +581,12 @@ def append_symbols_from_file(src_sym_file: Path, rename_assets=False):
                 symbols_to_append.append(element)
                 existing_main_symbols.add(base_name)
                 appended_any = True
-                print(f"[OK] Appended symbol: {symbol_name}")
+                logger.info(f"Appended symbol: {symbol_name}")
             else:
-                print(f"[SKIP] Symbol already exists: {symbol_name}")
+                logger.info(f"[SKIP] Symbol already exists: {symbol_name}")
 
     if not appended_any:
-        print(f"[WARN] No new symbols added from {src_sym_file.name}")
+        logger.warning(f"No new symbols added from {src_sym_file.name}")
         return False
 
     # --- Save footprint map ---
@@ -608,7 +614,7 @@ def append_symbols_from_file(src_sym_file: Path, rename_assets=False):
             new_file_content = dumps(project_sexp, pretty_print=True, wrap=None)
 
         except Exception as e:
-            print(f"[WARN] Error modifying project library: {e}. Recreating file.")
+            logger.warning(f"Error modifying project library: {e}. Recreating file.")
             project_sym_path.unlink(missing_ok=True)
             new_file_content = None
 
@@ -691,7 +697,7 @@ def force_footprint_version(mod_text: str, dst_schema: int) -> str:
     try:
         sexp = loads(mod_text)
     except Exception as e:
-        print(f"[WARN] Could not parse footprint: {e}")
+        logger.warning(f"Could not parse footprint: {e}")
         return mod_text
 
     if dst_schema < KICAD9_SCHEMA:
@@ -716,7 +722,7 @@ def force_footprint_version(mod_text: str, dst_schema: int) -> str:
         if not has_version:
             sexp.insert(1, [Symbol("version"), KICAD8_SCHEMA])
 
-        print(f"[INFO] Downgraded footprint '{name}' → KiCad 8 (20221018)")
+        logger.info(f"Downgraded footprint '{name}' → KiCad 8 (20221018)")
         return dumps(sexp, pretty_print=True, wrap=None)
 
     else:
@@ -732,7 +738,7 @@ def force_footprint_version(mod_text: str, dst_schema: int) -> str:
         if not has_version:
             sexp.insert(1, [Symbol("version"), KICAD9_FOOTPRINT_SCHEMA])
 
-        print("[INFO] Upgraded footprint → KiCad 9 (20241229)")
+        logger.info("Upgraded footprint → KiCad 9 (20241229)")
         return dumps(sexp, pretty_print=True, wrap=None)
 
 
@@ -752,7 +758,7 @@ def localize_3d_model_path(mod_file: Path, footprint_map: dict, mod_text: str | 
                 mod_text = f.read()
         mod_sexp = loads(mod_text)
     except Exception as e:
-        print(f"[WARN] Could not parse {mod_file.name} for 3D localization: {e}")
+        logger.warning(f"Could not parse {mod_file.name} for 3D localization: {e}")
         return mod_text
 
     modified = False
@@ -772,22 +778,22 @@ def rename_extracted_assets(tempdir: Path, footprint_map: dict, use_symbol_name:
     If use_symbol_name=True, rename using the symbol base name instead.
     Returns the number of renamed files.
     """
-    print("[INFO] rename_extracted_assets() called")
-    print(f"[DEBUG] use_symbol_name={use_symbol_name}, tempdir={tempdir}")
+    logger.info("rename_extracted_assets() called")
+    logger.debug(f"use_symbol_name={use_symbol_name}, tempdir={tempdir}")
     if not footprint_map:
-        print("[WARN] footprint_map is empty")
+        logger.warning("footprint_map is empty")
     else:
-        print(f"[DEBUG] footprint_map has {len(footprint_map)} entries:")
+        logger.debug(f"footprint_map has {len(footprint_map)} entries:")
     for k, v in footprint_map.items():
-        print(f"    {k} → {v}")
+        logger.info(f"    {k} → {v}")
 
     rename_count = 0
 
-    print("[DEBUG] rename_extracted_assets() called")
-    print(f"[DEBUG] use_symbol_name={use_symbol_name}, tempdir={tempdir}")
-    print(f"[DEBUG] footprint_map has {len(footprint_map)} entries:")
+    logger.debug("rename_extracted_assets() called")
+    logger.debug(f"use_symbol_name={use_symbol_name}, tempdir={tempdir}")
+    logger.debug(f"footprint_map has {len(footprint_map)} entries:")
     for k, v in footprint_map.items():
-        print(f"    {k} → {v}")
+        logger.info(f"    {k} → {v}")
 
     # --- Footprints ---
     for mod_file in tempdir.rglob("*.kicad_mod"):
@@ -806,16 +812,16 @@ def rename_extracted_assets(tempdir: Path, footprint_map: dict, use_symbol_name:
         if symname:
             new_name = f"{symname}.kicad_mod"
         else:
-            print(f"[DEBUG] No match for footprint {stem} in footprint_map")
+            logger.debug(f"No match for footprint {stem} in footprint_map")
 
         new_path = mod_file.with_name(new_name)
         if new_path != mod_file:
             try:
                 mod_file.rename(new_path)
                 rename_count += 1
-                print(f"[OK] Renamed footprint: {mod_file.name} → {new_path.name}")
+                logger.info(f"Renamed footprint: {mod_file.name} → {new_path.name}")
             except Exception as e:
-                print(f"[FAIL] Error renaming footprint {mod_file.name}: {e}")
+                logger.error(f"Error renaming footprint {mod_file.name}: {e}")
 
     # --- 3D Models ---
     for model_file in tempdir.rglob("*.stp"):
@@ -832,25 +838,25 @@ def rename_extracted_assets(tempdir: Path, footprint_map: dict, use_symbol_name:
         if symname:
             new_name = f"{symname}{model_file.suffix}"
         else:
-            print(f"[DEBUG] No match for 3D model {stem} in footprint_map")
+            logger.debug(f"No match for 3D model {stem} in footprint_map")
 
         new_path = model_file.with_name(new_name)
         if new_path != model_file:
             try:
                 model_file.rename(new_path)
                 rename_count += 1
-                print(f"[OK] Renamed 3D model: {model_file.name} → {new_path.name}")
+                logger.info(f"Renamed 3D model: {model_file.name} → {new_path.name}")
             except Exception as e:
-                print(f"[FAIL] Error renaming 3D model {model_file.name}: {e}")
+                logger.error(f"[FAIL] Error renaming 3D model {model_file.name}: {e}")
 
     if rename_count == 0:
-        print("[WARN] No files were renamed — check footprint_map keys vs extracted file names:")
+        logger.warning("No files were renamed — check footprint_map keys vs extracted file names:")
     for mod in tempdir.rglob("*.kicad_mod"):
-        print(f"    found footprint file: {mod.name}")
+        logger.info(f"    found footprint file: {mod.name}")
     for stp in tempdir.rglob("*.stp"):
-        print(f"    found 3D model file: {stp.name}")
+        logger.info(f"    found 3D model file: {stp.name}")
     else:
-        print(f"[INFO] Renamed {rename_count} files total.")
+        logger.info(f"Renamed {rename_count} files total.")
 
 
     return rename_count
@@ -871,7 +877,7 @@ def process_zip(zip_file, rename_assets: bool = False, use_symbol_name: bool = F
     - copy .stp models
     """
     if use_symbol_name:
-        print(f"[INFO] Using symbol name as footprint and 3D model name for {zip_file.name}")
+        logger.info(f"Using symbol name as footprint and 3D model name for {zip_file.name}")
     
     # Prep temp extraction dir
     zip_file = Path(str(zip_file).strip()).resolve()
@@ -880,14 +886,14 @@ def process_zip(zip_file, rename_assets: bool = False, use_symbol_name: bool = F
         shutil.rmtree(tempdir)
     tempdir.mkdir(exist_ok=True)
 
-    print(f"[DEBUG] Importing ZIP: {zip_file}")
-    print(f"[DEBUG] Temporary extraction folder: {tempdir}")
+    logger.debug(f"Importing ZIP: {zip_file}")
+    logger.debug(f"Temporary extraction folder: {tempdir}")
 
     try:
         with zipfile.ZipFile(zip_file, "r") as zip_ref:
             zip_ref.extractall(tempdir)
     except Exception as e:
-        print(f"[FAIL] Error extracting ZIP file {zip_file.name}: {e}")
+        logger.error(f"[FAIL] Error extracting ZIP file {zip_file.name}: {e}")
         return
 
     # Detect KiCad + 3D roots inside extraction
@@ -905,7 +911,7 @@ def process_zip(zip_file, rename_assets: bool = False, use_symbol_name: bool = F
         subs = [f for f in tempdir.iterdir() if f.is_dir()]
         if len(subs) == 1:
             nested_root = subs[0]
-            print(f"[DEBUG] Found nested folder: {nested_root.name}")
+            logger.debug(f"Found nested folder: {nested_root.name}")
             for d in nested_root.rglob("*"):
                 if d.is_dir() and d.name.lower() == "kicad":
                     kicad_root = d
@@ -914,31 +920,31 @@ def process_zip(zip_file, rename_assets: bool = False, use_symbol_name: bool = F
 
     if not kicad_root:
         kicad_root = tempdir
-        print("[WARN] KiCad folder not found, using temp root.")
+        logger.warning("KiCad folder not found, using temp root.")
     if not model_root:
         model_root = tempdir
-        print("[WARN] 3D folder not found, using temp root.")
+        logger.warning("3D folder not found, using temp root.")
 
-    print(f"[DEBUG] KiCad root detected: {kicad_root}")
-    print(f"[DEBUG] 3D root detected: {model_root}")
+    logger.debug(f"KiCad root detected: {kicad_root}")
+    logger.debug(f"3D root detected: {model_root}")
 
     # --- symbols ---
     symbol_files = list(kicad_root.rglob("*.kicad_sym"))
-    print(f"[DEBUG] Found {len(symbol_files)} .kicad_sym files.")
+    logger.debug(f"Found {len(symbol_files)} .kicad_sym files.")
 
     if not symbol_files:
-        print(f"[FAIL] No symbol files found in extracted ZIP {zip_file.name}.")
+        logger.error(f"[FAIL] No symbol files found in extracted ZIP {zip_file.name}.")
         shutil.rmtree(tempdir)
         return
 
     symbols_added = False
     for sym_file in symbol_files:
-        print(f"[DEBUG] Processing symbol file: {sym_file}")
+        logger.debug(f"Processing symbol file: {sym_file}")
         if append_symbols_from_file(sym_file, rename_assets=(rename_assets or use_symbol_name)):
             symbols_added = True
 
     if not symbols_added and not TEMP_MAP_FILE.exists():
-        print("[WARN] No new symbols added — skipping footprints and 3D models.")
+        logger.warning("No new symbols added — skipping footprints and 3D models.")
         shutil.rmtree(tempdir)
         return
 
@@ -947,12 +953,12 @@ def process_zip(zip_file, rename_assets: bool = False, use_symbol_name: bool = F
     if TEMP_MAP_FILE.exists():
         with open(TEMP_MAP_FILE, "r") as f:
             footprint_map = json.load(f)
-        print(f"[DEBUG] Loaded footprint map with {len(footprint_map)} entries.")
+        logger.debug(f"Loaded footprint map with {len(footprint_map)} entries.")
 
     # --- rename assets in temp if desired ---
     if rename_assets or use_symbol_name:
         mode = "Symbol-name based" if use_symbol_name else "Default"
-        print(f"[INFO] Renaming of Footprints/3D Models ENABLED ({mode}).")
+        logger.info(f"Renaming of Footprints/3D Models ENABLED ({mode}).")
 
         rename_count = rename_extracted_assets(
             tempdir,
@@ -963,18 +969,18 @@ def process_zip(zip_file, rename_assets: bool = False, use_symbol_name: bool = F
         if rename_count > 0 and TEMP_MAP_FILE.exists():
             with open(TEMP_MAP_FILE, "r") as f:
                 footprint_map = json.load(f)
-        print(f"[INFO] Renamed {rename_count} assets.")
+        logger.info(f"Renamed {rename_count} assets.")
 
 
     # --- footprints ---
     project_version = detect_project_version(PROJECT_DIR)
     dst_schema = KICAD8_SCHEMA if project_version < KICAD9_SCHEMA else KICAD9_FOOTPRINT_SCHEMA
-    print(f"[DEBUG] Target project schema for footprints: {dst_schema}")
+    logger.debug(f"Target project schema for footprints: {dst_schema}")
 
     for mod_file in kicad_root.rglob("*.kicad_mod"):
         dest = PROJECT_FOOTPRINT_LIB / mod_file.name
         if dest.exists():
-            print(f'[WARN] Skipped footprint "{mod_file.name}": already exists.')
+            logger.warning(f'Skipped footprint "{mod_file.name}": already exists.')
             continue
 
         try:
@@ -990,12 +996,12 @@ def process_zip(zip_file, rename_assets: bool = False, use_symbol_name: bool = F
                 except ValueError:
                     pass
 
-            print(f"[DEBUG] Converting {mod_file.name}: {src_schema} → {dst_schema}")
+            logger.debug(f"Converting {mod_file.name}: {src_schema} → {dst_schema}")
 
             if src_schema != dst_schema:
                 mod_text = force_footprint_version(mod_text, dst_schema)
             else:
-                print(f"[INFO] {mod_file.name} already matches target schema.")
+                logger.info(f"{mod_file.name} already matches target schema.")
 
             # localize 3D model path using final text
             mod_text = localize_3d_model_path(mod_file, footprint_map, mod_text)
@@ -1003,34 +1009,34 @@ def process_zip(zip_file, rename_assets: bool = False, use_symbol_name: bool = F
             with open(dest, "w", encoding="utf-8") as outf:
                 outf.write(mod_text)
 
-            print(f'[OK] Added footprint "{mod_file.name}" (KiCad {"8" if dst_schema < KICAD9_SCHEMA else "9"} schema).')
+            logger.info(f'Added footprint "{mod_file.name}" (KiCad {"8" if dst_schema < KICAD9_SCHEMA else "9"} schema).')
 
         except Exception as e:
-            print(f"[FAIL] Error processing footprint {mod_file.name}: {e}")
+            logger.error(f"[FAIL] Error processing footprint {mod_file.name}: {e}")
 
     # --- 3D models ---
     copied_3d_count = 0
     for stp_file in model_root.rglob("*.stp"):
         dest_file = PROJECT_3D_DIR / stp_file.name
         if dest_file.exists():
-            print(f'[WARN] Skipped 3D model "{stp_file.name}" (already exists).')
+            logger.warning(f'Skipped 3D model "{stp_file.name}" (already exists).')
             continue
         try:
             shutil.copy(stp_file, dest_file)
             copied_3d_count += 1
-            print(f'[OK] Copied 3D model "{stp_file.name}" → {PROJECT_3D_DIR.name}')
+            logger.info(f'Copied 3D model "{stp_file.name}" → {PROJECT_3D_DIR.name}')
         except Exception as e:
-            print(f"[FAIL] Error copying 3D model {stp_file.name}: {e}")
+            logger.error(f"[FAIL] Error copying 3D model {stp_file.name}: {e}")
 
     if copied_3d_count == 0:
-        print("[WARN] No new 3D models found or copied.")
+        logger.warning("No new 3D models found or copied.")
 
     # cleanup temp + temp map
     shutil.rmtree(tempdir)
     if TEMP_MAP_FILE.exists():
         TEMP_MAP_FILE.unlink()
 
-    print(f"[OK] Finished importing {zip_file.name}")
+    logger.info(f"Finished importing {zip_file.name}")
 
 
 def purge_zip_contents(zip_path: Path):
@@ -1045,13 +1051,13 @@ def purge_zip_contents(zip_path: Path):
         shutil.rmtree(tempdir)
     tempdir.mkdir(exist_ok=True)
 
-    print(f"\n--- Purging contents of {zip_path.name} ---")
+    logger.info(f"--- Purging contents of {zip_path.name} ---")
 
     try:
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
             all_zip_names = zip_ref.namelist()
     except Exception as e:
-        print(f"Error reading ZIP file {zip_path.name}: {e}")
+        logger.error(f"Error reading ZIP file {zip_path.name}: {e}")
         shutil.rmtree(tempdir)
         return
 
@@ -1083,7 +1089,7 @@ def purge_zip_contents(zip_path: Path):
                         symbols_to_delete.add(base_name)
 
             except Exception as e:
-                print(f"Error processing symbol file {name} during purge: {e}")
+                logger.error(f"Error processing symbol file {name} during purge: {e}")
 
         elif name_path.suffix == ".kicad_mod":
             original_footprint_stems.add(name_path.stem)
@@ -1093,7 +1099,7 @@ def purge_zip_contents(zip_path: Path):
 
     # remove symbols from ProjectSymbols.kicad_sym
     if symbols_to_delete and PROJECT_SYMBOL_LIB.exists():
-        print(
+        logger.info(
             f"Attempting to delete {len(symbols_to_delete)} main symbols from {PROJECT_SYMBOL_LIB.name}..."
         )
 
@@ -1120,14 +1126,14 @@ def purge_zip_contents(zip_path: Path):
             if deleted_count > 0:
                 with open(PROJECT_SYMBOL_LIB, "w", encoding="utf-8") as f:
                     f.write(dumps(new_project_sexp, pretty_print=True))
-                print(
+                logger.info(
                     f"Deleted {deleted_count} symbol block(s) corresponding to {len(symbols_to_delete)} main symbols."
                 )
             else:
-                print("No matching symbols found for deletion.")
+                logger.info("No matching symbols found for deletion.")
 
         except Exception as e:
-            print(f"ERROR during S-expression symbol deletion: {e}")
+            logger.error(f"ERROR during S-expression symbol deletion: {e}")
 
     # remove .kicad_mod footprints
     deleted_fp_count = 0
@@ -1142,7 +1148,7 @@ def purge_zip_contents(zip_path: Path):
 
         stems_checked.add(stem)
 
-    print(f"Deleted {deleted_fp_count} footprints from {PROJECT_FOOTPRINT_LIB.name}.")
+    logger.info(f"Deleted {deleted_fp_count} footprints from {PROJECT_FOOTPRINT_LIB.name}.")
 
     # remove .stp models
     deleted_3d_count = 0
@@ -1153,7 +1159,7 @@ def purge_zip_contents(zip_path: Path):
             stp_path.unlink()
             deleted_3d_count += 1
 
-    print(f"Deleted {deleted_3d_count} 3D model files from {PROJECT_3D_DIR.name}.")
+    logger.info(f"Deleted {deleted_3d_count} 3D model files from {PROJECT_3D_DIR.name}.")
 
     shutil.rmtree(tempdir)
 
@@ -1169,11 +1175,11 @@ def export_symbols(selected_symbols: list[str]) -> list[Path]:
 
     try:
         if not selected_symbols:
-            print("[FAIL] No symbols provided for export.")
+            logger.error("[FAIL] No symbols provided for export.")
             return []
 
         if not PROJECT_SYMBOL_LIB.exists():
-            print("[FAIL] Project symbol library not found.")
+            logger.error("[FAIL] Project symbol library not found.")
             return []
 
         with open(PROJECT_SYMBOL_LIB, "r", encoding="utf-8") as f:
@@ -1212,7 +1218,7 @@ def export_symbols(selected_symbols: list[str]) -> list[Path]:
                     break
 
             if not footprint_ref:
-                print(f"[WARN] Symbol '{sym}' has no footprint assigned, skipping.")
+                logger.warning(f"Symbol '{sym}' has no footprint assigned, skipping.")
                 continue
 
             footprint_basename = footprint_ref.split(":")[-1]
@@ -1223,7 +1229,7 @@ def export_symbols(selected_symbols: list[str]) -> list[Path]:
                     found_fp = fp
                     break
             if not found_fp:
-                print(f"[WARN] Footprint '{footprint_basename}' not found for {sym}, skipping.")
+                logger.warning(f"Footprint '{footprint_basename}' not found for {sym}, skipping.")
                 continue
 
             # extract symbol definition
@@ -1238,7 +1244,7 @@ def export_symbols(selected_symbols: list[str]) -> list[Path]:
                     single_symbol_sexpr = el
                     break
             if not single_symbol_sexpr:
-                print(f"[WARN] Symbol '{sym}' not found in {PROJECT_SYMBOL_LIB.name}.")
+                logger.warning(f"Symbol '{sym}' not found in {PROJECT_SYMBOL_LIB.name}.")
                 continue
 
             # prep temp layout for this export
@@ -1292,7 +1298,7 @@ def export_symbols(selected_symbols: list[str]) -> list[Path]:
                 try:
                     m = re.search(r'["\']?([^"\']+\.stp)["\']?', block, flags=re.IGNORECASE)
                     if not m:
-                        print(f"[WARN] Could not extract model path from block: {block[:80]}...")
+                        logger.warning(f"Could not extract model path from block: {block[:80]}...")
                         continue
 
                     raw_path = m.group(1).replace("\\", "/")
@@ -1316,18 +1322,18 @@ def export_symbols(selected_symbols: list[str]) -> list[Path]:
 
                     if model_path.exists():
                         resolved_models.append(model_path)
-                        print(f"[DEBUG] Found 3D model for {sym}: {model_path}")
+                        logger.debug(f"Found 3D model for {sym}: {model_path}")
                     else:
                         # try relative to footprint dir
                         rel_model = (PROJECT_FOOTPRINT_LIB.parent / model_path.name).resolve()
                         if rel_model.exists():
                             resolved_models.append(rel_model)
-                            print(f"[DEBUG] Found relative 3D model for {sym}: {rel_model}")
+                            logger.debug(f"Found relative 3D model for {sym}: {rel_model}")
                         else:
-                            print(f"[WARN] 3D model not found: {model_path}")
+                            logger.warning(f"3D model not found: {model_path}")
 
                 except Exception as e:
-                    print(f"[WARN] Failed to parse model block: {e}")
+                    logger.warning(f"Failed to parse model block: {e}")
 
             for model_path in resolved_models:
                 if model_path.exists():
@@ -1343,18 +1349,18 @@ def export_symbols(selected_symbols: list[str]) -> list[Path]:
             )
             export_paths.append(zip_path)
 
-            print(f"[OK] Exported {zip_name}")
+            logger.info(f"Exported {zip_name}")
             shutil.rmtree(part_folder)
 
         if export_paths:
-            print(f"[OK] Created {len(export_paths)} ZIP file(s) in {output_root}")
+            logger.info(f"Created {len(export_paths)} ZIP file(s) in {output_root}")
         else:
-            print("[WARN] No ZIPs created.")
-        print(f"[OK] Output directory: {output_root}")
+            logger.warning("No ZIPs created.")
+        logger.info(f"Output directory: {output_root}")
         return export_paths
 
     except Exception as e:
-        print(f"[FAIL] Export failed: {e}")
+        logger.error(f"[FAIL] Export failed: {e}")
         return []
 
 

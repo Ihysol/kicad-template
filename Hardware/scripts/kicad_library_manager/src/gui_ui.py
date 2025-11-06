@@ -18,7 +18,6 @@ from gui_core import (
     RENAME_ASSETS_KEY,
     load_config,
     save_config,
-    log_message,
     clear_log,
     show_full_log_popup,
     process_action,

@@ -2,12 +2,35 @@ import wx
 import wx.dataview as dv
 from pathlib import Path
 import threading
+import sys
+
+
+# ===============================
+# Logging
+# ===============================
+import logging
+
+logger = logging.getLogger("kicad_library_manager")
+logger.setLevel(logging.DEBUG)
+
+# --- Add console handler (if not already present) ---
+if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.DEBUG)
+    console_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S")
+    )
+    logger.addHandler(console_handler)
+
+# Don't let logs bubble up to root logger (avoids duplicates)
+logger.propagate = False
+
+
 from gui_core import (
     APP_VERSION,
     load_config,
     save_config,
     clear_log,
-    log_message,
     process_action,
     export_action,
     update_drc_rules,
@@ -20,6 +43,23 @@ from gui_core import (
     on_tab_change,
     USE_SYMBOLNAME_KEY
 )
+
+class WxGuiLogHandler(logging.Handler):
+    """Custom logging handler that forwards logs into wx TextCtrl."""
+    def __init__(self, gui_frame):
+        super().__init__()
+        self.gui_frame = gui_frame
+
+    def emit(self, record):
+        try:
+            # Format only the message part — not the timestamp twice
+            clean_msg = record.getMessage()
+            prefix = f"{record.asctime if hasattr(record, 'asctime') else ''}"
+            formatted = f"{record.levelname}: {clean_msg}" if record.levelno != logging.INFO else clean_msg
+            wx.CallAfter(self.gui_frame.append_log, formatted)
+        except Exception:
+            pass
+
 
 # ===============================
 # DearPyGui compatibility shim
@@ -169,6 +209,7 @@ class DpgShim:
     gui_ui.build_file_list_ui = lambda dpg: dpg.build_file_list_ui()
     gui_ui.refresh_symbol_list = lambda dpg: dpg.refresh_symbol_list()
 
+
 # ===============================
 # Main GUI Frame
 # ===============================
@@ -183,8 +224,14 @@ class MainFrame(wx.Frame):
         initial_load(self.shim)
         cfg = load_config()
         self.chk_use_symbol_name.SetValue(cfg.get(USE_SYMBOLNAME_KEY, False))
+        # --- logger setup (only add once) ---
+        if not any(isinstance(h, WxGuiLogHandler) for h in logger.handlers):
+            gui_handler = WxGuiLogHandler(self)
+            gui_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S"))
+            logger.addHandler(gui_handler)
+            logger.propagate = False  # prevent double-printing via root logger
 
-
+        
     # ---------- Layout ----------
     def InitUI(self):
         panel = wx.Panel(self)
@@ -378,7 +425,7 @@ class MainFrame(wx.Frame):
         try:
             from gui_core import refresh_symbol_list
             refresh_symbol_list(self.shim)
-            self.append_log("[OK] Symbol list refreshed.")
+            self.append_log("Symbol list refreshed.")
         except Exception as e:
             self.append_log(f"[ERROR] Failed to refresh symbols: {e}")
 
@@ -476,6 +523,7 @@ class MainFrame(wx.Frame):
 
 # --- Patch backend ZIP selection handling for DataViewListCtrl ---
 import gui_core
+
 
 def _wx_get_active_files_for_processing(dpg):
     """Return checked ZIP paths from DataViewListCtrl."""
