@@ -39,7 +39,7 @@ logger = logging.getLogger("kicad_library_manager")
 # =========================
 # Globals 
 # =========================
-APP_VERSION = "v0.1"
+APP_VERSION = "v1.0"
 FONT_SIZE = 18
 
 # cache of main symbols already in the project library
@@ -264,14 +264,12 @@ def update_existing_symbols_cache(dpg):
 # ---------------------------
 # ZIP scanning
 # ---------------------------
-
-
 def check_zip_for_existing_symbols(zip_paths: List[Path]):
     """
     Populate GUI_FILE_DATA with info about each ZIP:
-    - status: NEW / PARTIAL / NONE / ERROR
+    - status: NEW / PARTIAL / MISSING_SYMBOL / MISSING_FOOTPRINT / ERROR
     - tooltip: explanation
-    Mirrors original behavior.
+    Mirrors original behavior with more descriptive missing states.
     """
     global GUI_FILE_DATA, PROJECT_EXISTING_SYMBOLS
     GUI_FILE_DATA.clear()
@@ -290,40 +288,54 @@ def check_zip_for_existing_symbols(zip_paths: List[Path]):
 
             try:
                 with zipfile.ZipFile(p, "r") as zf:
-                    sym_files = [
-                        n for n in zf.namelist() if n.lower().endswith(".kicad_sym")
-                    ]
+                    # Look for main asset types
+                    sym_files = [n for n in zf.namelist() if n.lower().endswith(".kicad_sym")]
+                    fp_files = [n for n in zf.namelist() if n.lower().endswith(".kicad_mod")]
+                    model_files = [n for n in zf.namelist() if n.lower().endswith(".stp")]
 
+                    # --- Missing symbol library entirely ---
                     if not sym_files:
-                        row["status"] = "NONE"
-                        row["tooltip"] = "ZIP does not contain any .kicad_sym files."
+                        row["status"] = "MISSING_SYMBOL"
+                        row["tooltip"] = "ZIP does not contain any .kicad_sym files (symbols)."
                         GUI_FILE_DATA.append(row)
                         continue
 
-                    # naive heuristic: does the ZIP filename contain
-                    # an already-existing symbol name?
+                    # --- Has symbols but missing footprints ---
+                    if not fp_files:
+                        row["status"] = "MISSING_FOOTPRINT"
+                        row["tooltip"] = (
+                            f"Contains {len(sym_files)} symbol file(s) "
+                            "but no .kicad_mod footprints."
+                        )
+                        GUI_FILE_DATA.append(row)
+                        continue
+
+                    # --- Check if symbol already in project ---
                     found_partial = False
                     for existing_sym in PROJECT_EXISTING_SYMBOLS:
                         if existing_sym.lower() in p.stem.lower():
                             row["status"] = "PARTIAL"
                             row["tooltip"] = (
-                                f"Contains symbols (e.g. '{existing_sym}') already in library. "
-                                "Unchecked by default to prevent accidental override."
+                                f"Contains symbols (e.g. '{existing_sym}') "
+                                "already in library. Unchecked by default."
                             )
                             found_partial = True
                             break
 
+                    # --- Mark as new if not found ---
                     if not found_partial:
                         row["status"] = "NEW"
                         row["tooltip"] = (
-                            f"Contains {len(sym_files)} symbol file(s). Appears new."
+                            f"Contains {len(sym_files)} symbol file(s), "
+                            f"{len(fp_files)} footprint(s), {len(model_files)} model(s)."
                         )
 
             except Exception as e:
                 row["status"] = "ERROR"
-                row["tooltip"] = f"Could not scan: {e}"
+                row["tooltip"] = f"Could not scan ZIP: {e}"
 
             GUI_FILE_DATA.append(row)
+
 
 
 # ---------------------------

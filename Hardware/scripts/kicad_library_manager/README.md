@@ -47,9 +47,9 @@ Or run the standalone executable (`cse_manager.exe` on Windows or `cse_manager` 
 
 ```
 # Windows:
-pyinstaller --onefile --name kicad_library_manager --noconsole --add-data "fonts/NotoSans-Regular.ttf;fonts" main_gui.py
+pyinstaller --onefile --name kicad_library_manager --noconsole gui_wx.py
 
 # Linux:
-pyinstaller --onefile --name kicad_library_manager --noconsole --add-data "fonts/NotoSans-Regular.ttf:fonts" main_gui.py
+pyinstaller --onefile --name kicad_library_manager --noconsole gui_wx.py
 ```
 

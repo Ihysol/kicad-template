@@ -246,29 +246,42 @@ class DpgShim:
 
         # Map backend statuses to colours + display text
         status_styles = {
-            "NEW":       (wx.Colour(0, 255, 0),       "NEW"),
-            "PARTIAL":   (wx.Colour(255, 160, 0),    "IN PROJECT"),
-            "ERROR":     (wx.Colour(255, 80, 80),     "ERROR"),
-            "NONE":      (wx.Colour(180, 180, 180),   "MISSING"),
+            "NEW":              (wx.Colour(0, 255, 0),       "NEW"),
+            "PARTIAL":          (wx.Colour(255, 160, 0),     "IN PROJECT"),
+            "MISSING_SYMBOL":   (wx.Colour(255, 80, 80),     "Missing Symbol (cannot import)"),
+            "MISSING_FOOTPRINT":(wx.Colour(255, 80, 80),     "Missing Footprint (cannot import)"),
+            "ERROR":            (wx.Colour(255, 80, 80),     "ERROR"),
+            "NONE":             (wx.Colour(180, 180, 180),   "MISSING"),
         }
 
         for row in GUI_FILE_DATA:
             name = row.get("name", "unknown.zip")
             raw_status = row.get("status", "")
             colour, text = status_styles.get(raw_status, (wx.Colour(180, 180, 180), raw_status or "—"))
-            is_new = raw_status == "NEW"
+
+            # Disabled (invalid) if missing symbol or footprint
+            is_disabled = raw_status in ("MISSING_SYMBOL", "MISSING_FOOTPRINT")
 
             icon = self._make_status_icon(colour)
             icontext = wx.dataview.DataViewIconText(f" {text}", icon)
-            model.AppendItem([is_new, name, icontext, "double-click to delete"])
+
+            # Checkbox value = False if disabled (so cannot be imported)
+            # “Delete” column still available.
+            model.AppendItem([not is_disabled and raw_status != "PARTIAL", name, icontext, "double-click to delete"])
+
 
 
 
     # Hook into gui_ui so backend calls are redirected to wxPython
-    import gui_ui
+    import types, sys
+
+    # Create a dummy module "gui_ui" dynamically
+    gui_ui = types.ModuleType("gui_ui")
+    sys.modules["gui_ui"] = gui_ui
+
+    # Redirect backend functions to wx equivalents
     gui_ui.build_file_list_ui = lambda dpg: dpg.build_file_list_ui()
     gui_ui.refresh_symbol_list = lambda dpg: dpg.refresh_symbol_list()
-
 
 # ===============================
 # Main GUI Frame
@@ -299,7 +312,7 @@ class MainFrame(wx.Frame):
         vbox = wx.BoxSizer(wx.VERTICAL)
 
         # --- Folder selection ---
-        box1 = wx.StaticBox(panel, label="1. Select Archive Folder")
+        box1 = wx.StaticBox(panel, label="Select Archive Folder")
         s1 = wx.StaticBoxSizer(box1, wx.VERTICAL)
         h_buttons = wx.BoxSizer(wx.HORIZONTAL)
         self.btn_select = wx.Button(panel, label="Select ZIP Folder")
@@ -338,13 +351,15 @@ class MainFrame(wx.Frame):
             style=dv.DV_ROW_LINES | dv.DV_VERT_RULES | dv.DV_SINGLE
         )
         self.zip_file_list.AppendToggleColumn("", width=40)
-        self.zip_file_list.AppendTextColumn("Archive Name", width=500)
-        self.zip_file_list.AppendIconTextColumn("Status", width=120, align=wx.ALIGN_CENTER)
+        self.zip_file_list.AppendTextColumn("Archive Name", width=300)
+        self.zip_file_list.AppendIconTextColumn("Status", width=250, align=wx.ALIGN_LEFT)
         self.zip_file_list.AppendTextColumn("Delete", width=80, align=wx.ALIGN_CENTER)
         self.zip_file_list.SetDropTarget(ZipFileDropTarget(self))
         self.zip_file_list.Bind(dv.EVT_DATAVIEW_SELECTION_CHANGED, self.on_zip_row_clicked)
         self.zip_file_list.Bind(dv.EVT_DATAVIEW_ITEM_ACTIVATED, self.on_zip_delete_clicked)
         
+        # dynamically resize columns to always fill 100%
+        self.zip_file_list.Bind(wx.EVT_SIZE, self.on_resize_zip_columns)        
         self.zip_vbox.Add(wx.StaticText(self.tab_zip, label="ZIP Archives:"), 0, wx.BOTTOM, 5)
         self.zip_vbox.Add(self.zip_file_list, 1, wx.EXPAND | wx.BOTTOM, 5)
 
@@ -367,22 +382,41 @@ class MainFrame(wx.Frame):
 
         # --- Symbol tab content ---
         self.sym_vbox = wx.BoxSizer(wx.VERTICAL)
+        
         h_sym_top = wx.BoxSizer(wx.HORIZONTAL)
         self.btn_refresh_symbols = wx.Button(self.tab_symbol, label="Refresh Symbols")
         self.chk_master_symbols = wx.CheckBox(self.tab_symbol, label="Select All")
+        
+        # --- fix ghost button / layout artifact ---
+        self.btn_refresh_symbols.SetMinSize((150, -1))
+        self.chk_master_symbols.SetMinSize((100, -1))
+        self.btn_refresh_symbols.SetWindowStyleFlag(wx.BU_EXACTFIT)
+
         h_sym_top.Add(self.btn_refresh_symbols, 0, wx.RIGHT, 8)
         h_sym_top.Add(self.chk_master_symbols, 0, wx.ALIGN_CENTER_VERTICAL)
         self.sym_vbox.Add(h_sym_top, 0, wx.BOTTOM, 5)
+        
         self.symbol_list = wx.CheckListBox(self.tab_symbol)
         self.sym_vbox.Add(wx.StaticText(self.tab_symbol, label="Project Symbols:"), 0, wx.BOTTOM, 5)
         self.sym_vbox.Add(self.symbol_list, 1, wx.EXPAND | wx.BOTTOM, 5)
+
+        # --- Export + Orphan Delete Buttons ---
         self.btn_export = wx.Button(self.tab_symbol, label="EXPORT SELECTED")
         self.btn_open_output = wx.Button(self.tab_symbol, label="OPEN OUTPUT FOLDER")
+        self.btn_delete_orphans = wx.Button(self.tab_symbol, label="DELETE SELECTED")
+        self.tab_symbol.Layout()
+        self.btn_delete_orphans.SetForegroundColour(wx.RED)
+
         h_sym_btns = wx.BoxSizer(wx.HORIZONTAL)
+        self.btn_delete_selected = wx.Button(self.tab_symbol, label="DELETE SELECTED")
+        self.btn_delete_selected.SetForegroundColour(wx.RED)
+
         h_sym_btns.Add(self.btn_export, 0, wx.RIGHT, 8)
-        h_sym_btns.Add(self.btn_open_output, 0)
+        h_sym_btns.Add(self.btn_open_output, 0, wx.RIGHT, 8)
+        h_sym_btns.Add(self.btn_delete_selected, 0)
         self.sym_vbox.Add(h_sym_btns, 0, wx.TOP, 5)
         self.tab_symbol.SetSizer(self.sym_vbox)
+
 
         # --- DRC tab content ---
         self.drc_vbox = wx.BoxSizer(wx.VERTICAL)
@@ -391,21 +425,20 @@ class MainFrame(wx.Frame):
         self.drc_vbox.Add(self.btn_drc, 0, wx.BOTTOM, 5)
         self.tab_drc.SetSizer(self.drc_vbox)
 
-        # --- Progress + log ---
-        self.gauge = wx.Gauge(panel, range=100, size=(-1, 22))
+        # --- Log output ---
         self.log_ctrl = wx.TextCtrl(panel, style=wx.TE_MULTILINE | wx.TE_READONLY)
-        vbox.Add(self.gauge, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         vbox.Add(self.log_ctrl, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
 
         # --- Footer ---
         footer_box = wx.BoxSizer(wx.HORIZONTAL)
         self.btn_author = wx.Button(panel, label="By: Ihysol (Tobias Gent)", style=wx.BU_EXACTFIT)
-        self.btn_author.SetForegroundColour(wx.Colour(150, 150, 255))
+        self.btn_author.SetForegroundColour(wx.Colour(50, 50, 255))
         self.btn_author.SetBackgroundColour(panel.GetBackgroundColour())
         self.btn_author.SetCursor(wx.Cursor(wx.CURSOR_HAND))
         footer_box.Add(self.btn_author, 0, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 10)
         self.btn_issues = wx.Button(panel, label="Report Bug / Suggest Feature", style=wx.BU_EXACTFIT)
-        self.btn_issues.SetForegroundColour(wx.Colour(150, 150, 255))
+        self.btn_issues.SetForegroundColour(wx.Colour(50, 50, 255))
         self.btn_issues.SetBackgroundColour(panel.GetBackgroundColour())
         self.btn_issues.SetCursor(wx.Cursor(wx.CURSOR_HAND))
         footer_box.Add(self.btn_issues, 0, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 10)
@@ -421,6 +454,8 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_BUTTON, self.on_refresh_symbols, self.btn_refresh_symbols)
         self.Bind(wx.EVT_CHECKLISTBOX, self.on_symbol_item_toggled, self.symbol_list)
         self.Bind(wx.EVT_CHECKBOX, self.on_use_symbol_name_toggled, self.chk_use_symbol_name)
+        self.Bind(wx.EVT_BUTTON, self.on_delete_selected, self.btn_delete_selected)
+
 
         self.Bind(wx.EVT_CHECKBOX, self.on_master_symbols_toggle, self.chk_master_symbols)
         self.Bind(wx.EVT_BUTTON, self.on_export, self.btn_export)
@@ -436,6 +471,123 @@ class MainFrame(wx.Frame):
         self.notebook.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self.on_tab_changed)
 
     # ---------- Event handlers ----------
+    def on_resize_zip_columns(self, event):
+        """Keep ZIP list columns evenly split (33% each) when resized."""
+        event.Skip()
+        total_width = self.zip_file_list.GetClientSize().width
+        toggle_col_width = 40  # keep the first checkbox column fixed
+        usable_width = max(total_width - toggle_col_width, 0)
+
+        # Split remaining width equally among the 3 visible columns
+        col_width = usable_width // 3
+        self.zip_file_list.GetColumn(1).SetWidth(col_width)  # Archive Name
+        self.zip_file_list.GetColumn(2).SetWidth(col_width)  # Status
+        self.zip_file_list.GetColumn(3).SetWidth(col_width)  # Delete
+
+    
+    def on_delete_selected(self, event):
+        """Delete selected symbols (and linked footprints + 3D models)."""
+        from library_manager import PROJECT_SYMBOL_LIB, PROJECT_FOOTPRINT_LIB, PROJECT_3D_DIR
+        from sexpdata import loads, dumps, Symbol
+        import re, wx
+
+        lst = self.symbol_list
+        total = lst.GetCount()
+        selected = [lst.GetString(i) for i in range(total) if lst.IsChecked(i)]
+
+        if not selected:
+            self.append_log("[WARN] No symbols selected for deletion.")
+            return
+
+        dlg = wx.MessageDialog(
+            self,
+            f"Delete {len(selected)} selected symbol(s) and their linked assets?",
+            "Confirm Delete",
+            wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING,
+        )
+        if dlg.ShowModal() != wx.ID_YES:
+            dlg.Destroy()
+            return
+        dlg.Destroy()
+
+        deleted_syms = deleted_fp = deleted_3d = 0
+        linked_footprints = set()
+
+        try:
+            with open(PROJECT_SYMBOL_LIB, "r", encoding="utf-8") as f:
+                sym_data = loads(f.read())
+        except Exception as e:
+            self.append_log(f"[ERROR] Failed to parse symbol library: {e}")
+            return
+
+        new_sym_data = [sym_data[0]]
+
+        # Remove selected symbols and collect linked footprints
+        for el in sym_data[1:]:
+            if not (isinstance(el, list) and len(el) > 1 and str(el[0]) == "symbol"):
+                new_sym_data.append(el)
+                continue
+
+            sym_name = str(el[1])
+            if sym_name in selected:
+                for item in el:
+                    if (
+                        isinstance(item, list)
+                        and len(item) >= 3
+                        and str(item[0]) == "property"
+                        and str(item[1]) == "Footprint"
+                    ):
+                        fp_name = str(item[2]).split(":")[-1]
+                        linked_footprints.add(fp_name)
+                deleted_syms += 1
+                continue
+            new_sym_data.append(el)
+
+        # Save updated symbol library
+        if deleted_syms:
+            try:
+                with open(PROJECT_SYMBOL_LIB, "w", encoding="utf-8") as f:
+                    f.write(dumps(new_sym_data, pretty_print=True))
+                self.append_log(f"[OK] Deleted {deleted_syms} symbol(s) from project library.")
+            except Exception as e:
+                self.append_log(f"[ERROR] Failed to update symbol lib: {e}")
+
+        # Delete linked footprints and 3D models
+        for fp_name in linked_footprints:
+            fp_path = PROJECT_FOOTPRINT_LIB / f"{fp_name}.kicad_mod"
+            if fp_path.exists():
+                try:
+                    fp_path.unlink()
+                    deleted_fp += 1
+                    self.append_log(f"[OK] Deleted footprint: {fp_path.name}")
+                except Exception as e:
+                    self.append_log(f"[ERROR] Could not delete {fp_path.name}: {e}")
+
+            stp_path = PROJECT_3D_DIR / f"{fp_name}.stp"
+            if stp_path.exists():
+                try:
+                    stp_path.unlink()
+                    deleted_3d += 1
+                    self.append_log(f"[OK] Deleted 3D model: {stp_path.name}")
+                except Exception as e:
+                    self.append_log(f"[ERROR] Could not delete {stp_path.name}: {e}")
+
+        self.append_log(
+            f"[INFO] Deleted {deleted_syms} symbols, {deleted_fp} footprints, {deleted_3d} 3D models."
+        )
+
+        # --- refresh export list (UI + backend sync) ---
+        def _refresh_ui():
+            try:
+                self.shim.refresh_symbol_list()  # <---- key fix: this is the wx-side repopulation
+                self.append_log("[OK] Export list refreshed.")
+            except Exception as e:
+                self.append_log(f"[WARN] Could not refresh symbol list: {e}")
+
+        wx.CallAfter(_refresh_ui)
+
+
+    
     def on_zip_delete_clicked(self, event):
         """Delete the ZIP file when clicking the Delete column."""
         item = event.GetItem()
@@ -660,7 +812,7 @@ import gui_core
 
 
 def _wx_get_active_files_for_processing(dpg):
-    """Return checked ZIP paths from DataViewListCtrl."""
+    """Return checked ZIP paths from DataViewListCtrl that are valid for import."""
     try:
         from gui_core import GUI_FILE_DATA
     except Exception:
@@ -674,11 +826,24 @@ def _wx_get_active_files_for_processing(dpg):
     selected_paths = []
     for i in range(model.GetCount()):
         checked = model.GetValueByRow(i, 0)
-        if checked and i < len(GUI_FILE_DATA):
-            path = GUI_FILE_DATA[i].get("path")
-            if path:
-                selected_paths.append(path)
+        if not checked or i >= len(GUI_FILE_DATA):
+            continue
+
+        entry = GUI_FILE_DATA[i]
+        path = entry.get("path")
+        status = entry.get("status", "")
+        if status in ("MISSING_SYMBOL", "MISSING_FOOTPRINT"):
+            gui.append_log(f"[WARN] Skipping {Path(path).name}: missing required files.")
+            continue
+
+        if path:
+            selected_paths.append(path)
+
+    if not selected_paths:
+        gui.append_log("[WARN] No valid ZIPs selected for import (must contain both symbol + footprint).")
+
     return selected_paths
+
 
 gui_core.get_active_files_for_processing = _wx_get_active_files_for_processing
 
