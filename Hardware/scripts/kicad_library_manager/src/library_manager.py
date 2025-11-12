@@ -17,6 +17,7 @@ from sexpdata import loads, dumps, Symbol
 # Logger
 # ==========
 import logging
+
 logger = logging.getLogger("kicad_library_manager")
 
 # ---------------------------------------------------------------------------------
@@ -41,6 +42,7 @@ TEMP_MAP_FILE: Path
 # ---------------------------------------------------------------------------------
 # Small generic helpers
 # ---------------------------------------------------------------------------------
+
 
 def find_upward(target: str, start_path: Path) -> Path | None:
     """
@@ -85,14 +87,19 @@ def detect_project_version(start_path: Path) -> int:
                 if (
                     isinstance(node, list)
                     and len(node) >= 2
-                    and (node[0] == Symbol("generator_version") or node[0] == "generator_version")
+                    and (
+                        node[0] == Symbol("generator_version")
+                        or node[0] == "generator_version"
+                    )
                 ):
                     ver = str(node[1]).strip('"')
                     schema = major_to_schema(ver)
                     logger.debug(f"Detectegenerator_version {ver} → schema {schema}")
                     return schema
         except Exception as e:
-            logger.warning(f"Failed to parse {sch_file.name} for generator_version: {e}")
+            logger.warning(
+                f"Failed to parse {sch_file.name} for generator_version: {e}"
+            )
 
     for pattern in ["*.kicad_pro", "*.kicad_pcb"]:
         proj_file = find_upward(pattern, start_path)
@@ -107,7 +114,9 @@ def detect_project_version(start_path: Path) -> int:
                         and (node[0] == Symbol("version") or node[0] == "version")
                     ):
                         ver_val = int(node[1])
-                        logger.debug(f"Detected version {ver_val} from {proj_file.name}")
+                        logger.debug(
+                            f"Detected version {ver_val} from {proj_file.name}"
+                        )
                         return ver_val
             except Exception as e:
                 logger.warning(f"Failed to parse {proj_file.name} for version: {e}")
@@ -161,11 +170,7 @@ def find_sexp_element(sexp_list, target_tag: str):
     """Return the first S-expression (list) in sexp_list whose head == target_tag."""
     head_sym = Symbol(target_tag)
     for el in sexp_list:
-        if (
-            isinstance(el, list)
-            and el
-            and (el[0] == target_tag or el[0] == head_sym)
-        ):
+        if isinstance(el, list) and el and (el[0] == target_tag or el[0] == head_sym):
             return el
     return None
 
@@ -191,6 +196,7 @@ def find_sexp_property(sexp_list, prop_name: str):
 # ---------------------------------------------------------------------------------
 # Symbol conversion (8 <-> 9) helpers
 # ---------------------------------------------------------------------------------
+
 
 def _find_symbol_uuid_block(sym_node) -> int:
     """Return index of (uuid "...") in this symbol node, or -1."""
@@ -221,7 +227,11 @@ def convert_symbol_expr(sym_node, src_schema: int, dst_schema: int):
     9 → 8:
         - remove uuid
     """
-    if not (isinstance(sym_node, list) and len(sym_node) >= 2 and str(sym_node[0]) == "symbol"):
+    if not (
+        isinstance(sym_node, list)
+        and len(sym_node) >= 2
+        and str(sym_node[0]) == "symbol"
+    ):
         return sym_node
 
     out = [c for c in sym_node]
@@ -253,7 +263,9 @@ def _convert_symbol_recursive(sym_node, src_schema, dst_schema):
     out_children = []
     for child in converted_top:
         if isinstance(child, list) and child and str(child[0]) == "symbol":
-            out_children.append(_convert_symbol_recursive(child, src_schema, dst_schema))
+            out_children.append(
+                _convert_symbol_recursive(child, src_schema, dst_schema)
+            )
         else:
             out_children.append(child)
     return out_children
@@ -262,6 +274,7 @@ def _convert_symbol_recursive(sym_node, src_schema, dst_schema):
 # ---------------------------------------------------------------------------------
 # Symbol normalization for project (KiCad 8 hide rules, property placement, etc.)
 # ---------------------------------------------------------------------------------
+
 
 def normalize_expr_for_project(expr, project_version: int):
     """
@@ -272,15 +285,20 @@ def normalize_expr_for_project(expr, project_version: int):
     Also ensures (version ...) matches 8/9 schema.
     """
     HIDDEN_OFFSET_MARGIN_X = 20  # mm to right of rightmost pin
-    HIDDEN_OFFSET_STEP_Y = -2    # vertical spacing between properties
+    HIDDEN_OFFSET_STEP_Y = -2  # vertical spacing between properties
     HIDDEN_ROT = 0
 
     def deep_strip(e):
         """Remove KiCad9-only nodes that KiCad8 doesn't understand."""
         banned = {
-            Symbol("uuid"), Symbol("extends"), Symbol("template"),
-            Symbol("lib_id"), Symbol("style"), Symbol("parent"),
-            Symbol("embedded_fonts"), Symbol("text_styles"),
+            Symbol("uuid"),
+            Symbol("extends"),
+            Symbol("template"),
+            Symbol("lib_id"),
+            Symbol("style"),
+            Symbol("parent"),
+            Symbol("embedded_fonts"),
+            Symbol("text_styles"),
         }
         if not isinstance(e, list):
             return e
@@ -313,8 +331,12 @@ def normalize_expr_for_project(expr, project_version: int):
         """Ensure each (symbol ...) block in KiCad 9 has (uuid ...)."""
         if isinstance(e, list):
             newnode = [add_uuids(x) for x in e]
-            if e and e[0] == Symbol("symbol") and not any(
-                isinstance(i, list) and i and i[0] == Symbol("uuid") for i in e
+            if (
+                e
+                and e[0] == Symbol("symbol")
+                and not any(
+                    isinstance(i, list) and i and i[0] == Symbol("uuid") for i in e
+                )
             ):
                 newnode.insert(2, [Symbol("uuid"), str(uuid4())])
             return newnode
@@ -325,15 +347,21 @@ def normalize_expr_for_project(expr, project_version: int):
         if not (isinstance(sym, list) and sym and sym[0] == Symbol("symbol")):
             return sym
 
-        has_pin_names = any(isinstance(i, list) and i and i[0] == Symbol("pin_names") for i in sym)
-        has_pin_numbers = any(isinstance(i, list) and i and i[0] == Symbol("pin_numbers") for i in sym)
+        has_pin_names = any(
+            isinstance(i, list) and i and i[0] == Symbol("pin_names") for i in sym
+        )
+        has_pin_numbers = any(
+            isinstance(i, list) and i and i[0] == Symbol("pin_numbers") for i in sym
+        )
 
         insert_pos = 2 if len(sym) > 2 else len(sym)
         if not has_pin_numbers:
             sym.insert(insert_pos, [Symbol("pin_numbers"), Symbol("hide")])
             insert_pos += 1
         if not has_pin_names:
-            sym.insert(insert_pos, [Symbol("pin_names"), [Symbol("offset"), 0], Symbol("hide")])
+            sym.insert(
+                insert_pos, [Symbol("pin_names"), [Symbol("offset"), 0], Symbol("hide")]
+            )
 
         for i, sub in enumerate(sym):
             if isinstance(sub, list) and sub and sub[0] == Symbol("symbol"):
@@ -355,7 +383,9 @@ def normalize_expr_for_project(expr, project_version: int):
                             pass
         return max_x
 
-    def fix_property_layout_recursive(node, rightmost_x=0, prop_index=[0], for_kicad8=False):
+    def fix_property_layout_recursive(
+        node, rightmost_x=0, prop_index=[0], for_kicad8=False
+    ):
         """
         For all properties except Reference/Value:
         - place them at x=right_of_symbol, y staggered by 2mm
@@ -369,7 +399,8 @@ def normalize_expr_for_project(expr, project_version: int):
             if name not in ("Reference", "Value"):
                 # wipe old at/hide/effects
                 node[:] = [
-                    x for x in node
+                    x
+                    for x in node
                     if not (
                         isinstance(x, list)
                         and x
@@ -382,16 +413,20 @@ def normalize_expr_for_project(expr, project_version: int):
                 prop_index[0] += 1
 
                 if for_kicad8:
-                    node.append([
-                        Symbol("effects"),
-                        [Symbol("justify"), Symbol("left")],
-                        [Symbol("hide")],
-                    ])
+                    node.append(
+                        [
+                            Symbol("effects"),
+                            [Symbol("justify"), Symbol("left")],
+                            [Symbol("hide")],
+                        ]
+                    )
                 else:
-                    node.append([
-                        Symbol("effects"),
-                        [Symbol("justify"), Symbol("left")],
-                    ])
+                    node.append(
+                        [
+                            Symbol("effects"),
+                            [Symbol("justify"), Symbol("left")],
+                        ]
+                    )
                     node.append([Symbol("hide"), Symbol("yes")])
 
                 node.append([Symbol("at"), x_offset, y_offset, 0])
@@ -459,7 +494,9 @@ def ensure_project_symbol_header(project_sym_path: Path, project_version: int):
         with open(project_sym_path, "r", encoding="utf-8") as f:
             sexpr = loads(f.read())
     except Exception as e:
-        logger.warning(f"Failed to parse {project_sym_path.name} for header update: {e}")
+        logger.warning(
+            f"Failed to parse {project_sym_path.name} for header update: {e}"
+        )
         return
     if not isinstance(sexpr, list) or not sexpr:
         return
@@ -469,7 +506,8 @@ def ensure_project_symbol_header(project_sym_path: Path, project_version: int):
 
     # remove any old version/generator/generator_version
     sexpr = [
-        x for x in sexpr
+        x
+        for x in sexpr
         if not (
             isinstance(x, list)
             and x
@@ -491,9 +529,13 @@ def ensure_project_symbol_header(project_sym_path: Path, project_version: int):
                     pretty_print=True,
                 )
             )
-        logger.info(f"Updated header in {project_sym_path.name} → schema {target_schema}")
+        logger.info(
+            f"Updated header in {project_sym_path.name} → schema {target_schema}"
+        )
     except Exception as e:
-        logger.warning(f"Could not write updated header for {project_sym_path.name}: {e}")
+        logger.warning(
+            f"Could not write updated header for {project_sym_path.name}: {e}"
+        )
 
 
 def append_symbols_from_file(src_sym_file: Path, rename_assets=False):
@@ -515,7 +557,11 @@ def append_symbols_from_file(src_sym_file: Path, rename_assets=False):
         """Remove top-level (uuid ...) entries under each (symbol ...) block."""
         if isinstance(node, list):
             if node and node[0] == Symbol("symbol"):
-                node[:] = [n for n in node if not (isinstance(n, list) and n and n[0] == Symbol("uuid"))]
+                node[:] = [
+                    n
+                    for n in node
+                    if not (isinstance(n, list) and n and n[0] == Symbol("uuid"))
+                ]
             for child in node:
                 if isinstance(child, list):
                     _remove_top_uuid(child)
@@ -602,9 +648,11 @@ def append_symbols_from_file(src_sym_file: Path, rename_assets=False):
             with open(project_sym_path, "r", encoding="utf-8") as f:
                 project_sexp = loads(f.read())
 
-            if not (isinstance(project_sexp, list)
-                    and len(project_sexp) > 0
-                    and str(project_sexp[0]) == "kicad_symbol_lib"):
+            if not (
+                isinstance(project_sexp, list)
+                and len(project_sexp) > 0
+                and str(project_sexp[0]) == "kicad_symbol_lib"
+            ):
                 project_sexp = [Symbol("kicad_symbol_lib")] + project_sexp
 
             project_sexp.extend(symbols_to_append)
@@ -621,7 +669,9 @@ def append_symbols_from_file(src_sym_file: Path, rename_assets=False):
     # --- If file doesn't exist, create new ---
     if not project_sym_path.exists() or new_file_content is None:
         target_schema = (
-            KICAD9_SCHEMA if detect_project_version(PROJECT_DIR) >= KICAD9_SCHEMA else KICAD8_SCHEMA
+            KICAD9_SCHEMA
+            if detect_project_version(PROJECT_DIR) >= KICAD9_SCHEMA
+            else KICAD8_SCHEMA
         )
         gen_version = "9.0" if target_schema >= KICAD9_SCHEMA else "8.0"
 
@@ -645,11 +695,10 @@ def append_symbols_from_file(src_sym_file: Path, rename_assets=False):
     return True
 
 
-
-
 # ---------------------------------------------------------------------------------
 # Footprint (.kicad_mod) conversion and localization
 # ---------------------------------------------------------------------------------
+
 
 def _downgrade_footprint_for_v8(node):
     """
@@ -657,10 +706,21 @@ def _downgrade_footprint_for_v8(node):
     Removes e.g. uuid, tstamp, text_styles, embedded_fonts, keepout, etc.
     """
     banned = {
-        "uuid", "tstamp", "locked", "text_styles", "embedded_fonts", "font",
-        "model_uuid", "layerselection", "constraint", "outline_anchor",
-        "keepout", "zone_connect", "solder_paste_ratio",
-        "thermal_bridge_angle", "solder_mask_ratio",
+        "uuid",
+        "tstamp",
+        "locked",
+        "text_styles",
+        "embedded_fonts",
+        "font",
+        "model_uuid",
+        "layerselection",
+        "constraint",
+        "outline_anchor",
+        "keepout",
+        "zone_connect",
+        "solder_paste_ratio",
+        "thermal_bridge_angle",
+        "solder_mask_ratio",
     }
 
     if isinstance(node, list):
@@ -681,8 +741,10 @@ def _add_uuid_if_missing(node):
     if not isinstance(node, list):
         return node
     newnode = [_add_uuid_if_missing(x) for x in node]
-    if node and str(node[0]) == "module" and not any(
-        isinstance(i, list) and i and i[0] == Symbol("uuid") for i in node
+    if (
+        node
+        and str(node[0]) == "module"
+        and not any(isinstance(i, list) and i and i[0] == Symbol("uuid") for i in node)
     ):
         newnode.insert(2, [Symbol("uuid"), str(uuid4())])
     return newnode
@@ -690,59 +752,88 @@ def _add_uuid_if_missing(node):
 
 def force_footprint_version(mod_text: str, dst_schema: int) -> str:
     """
-    Convert a .kicad_mod footprint string between KiCad 9+ and KiCad 8:
-        - dst < KICAD9_SCHEMA → emit KiCad 8 style (module <name>, version 20221018)
-        - dst >= KICAD9_SCHEMA → emit KiCad 9 style (kicad_mod, version 20241229)
+    Convert a footprint string between KiCad 8 and KiCad 9:
+    - Keep the root as (module "<name>") for both.
+    - For KiCad 8 (dst < KICAD9_SCHEMA): strip 9-only nodes and set version 20221018.
+    - For KiCad 9 (dst >= KICAD9_SCHEMA): add uuid if missing and set version 20241229.
     """
     try:
         sexp = loads(mod_text)
+        # Some inputs come nested like [[module ...]]; flatten if so.
+        if isinstance(sexp, list) and len(sexp) == 1 and isinstance(sexp[0], list):
+            sexp = sexp[0]
     except Exception as e:
         logger.warning(f"Could not parse footprint: {e}")
         return mod_text
 
-    if dst_schema < KICAD9_SCHEMA:
-        # downgrade to KiCad 8
-        # force root to "module <name>"
-        name = "Unnamed_Footprint"
-        if isinstance(sexp, list) and len(sexp) > 1 and isinstance(sexp[1], str):
-            name = sexp[1]
-
+    # --- Force root: module "<name>" (never kicad_mod) ---
+    if not sexp or str(sexp[0]) not in {"module", Symbol("module")}:
         sexp[0] = Symbol("module")
-        if len(sexp) < 2 or not isinstance(sexp[1], str):
-            sexp.insert(1, name)
+    # Ensure name string is present at index 1
+    if len(sexp) < 2 or not isinstance(sexp[1], str):
+        sexp.insert(1, "Unnamed_Footprint")
 
+    if dst_schema < KICAD9_SCHEMA:
+        # Downgrade to KiCad 8
         sexp = _downgrade_footprint_for_v8(sexp)
-
-        # ensure (version 20221018)
         has_version = False
         for sub in sexp:
             if isinstance(sub, list) and str(sub[0]) == "version":
                 sub[1] = KICAD8_SCHEMA
                 has_version = True
         if not has_version:
-            sexp.insert(1, [Symbol("version"), KICAD8_SCHEMA])
-
-        logger.info(f"Downgraded footprint '{name}' → KiCad 8 (20221018)")
-        return dumps(sexp, pretty_print=True, wrap=None)
-
+            sexp.insert(2, [Symbol("version"), KICAD8_SCHEMA])
+        logger.info(f"Downgraded footprint '{sexp[1]}' → KiCad 8 (20221018)")
     else:
-        # upgrade to KiCad 9
+        # Upgrade to “KiCad 9 era” (still 'module' root)
         sexp = _add_uuid_if_missing(sexp)
-        sexp[0] = Symbol("kicad_mod")
-
         has_version = False
         for sub in sexp:
             if isinstance(sub, list) and str(sub[0]) == "version":
                 sub[1] = KICAD9_FOOTPRINT_SCHEMA
                 has_version = True
         if not has_version:
-            sexp.insert(1, [Symbol("version"), KICAD9_FOOTPRINT_SCHEMA])
+            sexp.insert(2, [Symbol("version"), KICAD9_FOOTPRINT_SCHEMA])
+        logger.info(
+            f"Upgraded footprint '{sexp[1]}' → KiCad 9 schema {KICAD9_FOOTPRINT_SCHEMA}"
+        )
 
-        logger.info("Upgraded footprint → KiCad 9 (20241229)")
-        return dumps(sexp, pretty_print=True, wrap=None)
+    # --- Serialize cleanly ---
+    text = dumps(sexp, pretty_print=True, wrap=None)
+
+    # Collapse redundant outer parentheses that sexpdata adds
+    text = re.sub(r"\(\s+fp_", "(fp_", text)
+    text = re.sub(r"\(\s+pad\s+", "(pad ", text)
+    text = re.sub(r"\(\s+model\s+", "(model ", text)
+    text = re.sub(r"\(\s+layer\s+", "(layer ", text)
+    text = re.sub(r"\(\s+at\s+", "(at ", text)
+    text = re.sub(r"\(\s+xyz\s+", "(xyz ", text)
+    text = re.sub(r"\(\s+effects\s+", "(effects ", text)
+    text = re.sub(r"\(\s+font\s+", "(font ", text)
+
+    # Merge all fp_arc/fp_line/fp_text etc. blocks into single-line expressions
+    def collapse_block(match):
+        block = match.group(0)
+        block = re.sub(r"\s*\n\s*", " ", block)  # collapse newlines
+        block = re.sub(r"\s{2,}", " ", block)  # collapse double spaces
+        return block.strip()
+
+    text = re.sub(
+        r"\(fp_(?:arc|line|text|poly|circle|rect)[^\)]*\)", collapse_block, text
+    )
+    text = re.sub(r"\(pad [^\)]*\)", collapse_block, text)
+    text = re.sub(r"\(model [^\)]*\)", collapse_block, text)
+
+    # Normalize spacing and close brackets
+    text = re.sub(r"\s+\)", ")", text)
+    text = re.sub(r"\)\s+\)", "))", text)
+
+    return text
 
 
-def localize_3d_model_path(mod_file: Path, footprint_map: dict, mod_text: str | None = None) -> str:
+def localize_3d_model_path(
+    mod_file: Path, footprint_map: dict, mod_text: str | None = None
+) -> str:
     """
     Rewrites (model "...") paths in `mod_text` (or on-disk file) to:
         ${KIPRJMOD}/3dmodels/<SymbolName>.stp
@@ -772,7 +863,9 @@ def localize_3d_model_path(mod_file: Path, footprint_map: dict, mod_text: str | 
     return dumps(mod_sexp, pretty_print=True, wrap=None) if modified else mod_text
 
 
-def rename_extracted_assets(tempdir: Path, footprint_map: dict, use_symbol_name: bool = False) -> int:
+def rename_extracted_assets(
+    tempdir: Path, footprint_map: dict, use_symbol_name: bool = False
+) -> int:
     """
     Rename extracted footprints and 3D models according to the given mapping.
     If use_symbol_name=True, rename using the symbol base name instead.
@@ -850,7 +943,9 @@ def rename_extracted_assets(tempdir: Path, footprint_map: dict, use_symbol_name:
                 logger.error(f"[FAIL] Error renaming 3D model {model_file.name}: {e}")
 
     if rename_count == 0:
-        logger.warning("No files were renamed — check footprint_map keys vs extracted file names:")
+        logger.warning(
+            "No files were renamed — check footprint_map keys vs extracted file names:"
+        )
     for mod in tempdir.rglob("*.kicad_mod"):
         logger.info(f"    found footprint file: {mod.name}")
     for stp in tempdir.rglob("*.stp"):
@@ -858,8 +953,129 @@ def rename_extracted_assets(tempdir: Path, footprint_map: dict, use_symbol_name:
     else:
         logger.info(f"Renamed {rename_count} files total.")
 
-
     return rename_count
+
+
+def fix_all_fp_arcs(text: str) -> str:
+    """
+    Normalize every (fp_arc ...) to KiCad 9 form:
+      (fp_arc (start x y) (mid xm ym) (end x y) (layer <L>) (width <W>))
+    Converts legacy (angle …) using proper sagitta geometry so 180° arcs don't collapse.
+    """
+    import re, math
+
+    # --- helpers --------------------------------------------------------------
+    def floats(s: str):
+        return [float(x) for x in re.findall(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', s)]
+
+    def rebuild_arc(block: str) -> str:
+        # Extract pieces
+        s_m = re.search(r'\(start\s+[^)]*\)', block)
+        e_m = re.search(r'\(end\s+[^)]*\)', block)
+        m_m = re.search(r'\(mid\s+[^)]*\)', block)
+        a_m = re.search(r'\(angle\s+([^\)]+)\)', block)
+        L_m = re.search(r'\(layer\s+([^) ]+)\)', block)
+        W_m = re.search(r'\(width\s+([^) ]+)\)', block)
+
+        if not (s_m and e_m):
+            return block  # can't fix
+
+        sx, sy = floats(s_m.group(0))[:2]
+        ex, ey = floats(e_m.group(0))[:2]
+
+        # If mid is missing but angle exists → compute with sagitta
+        if (m_m is None) and a_m:
+            ang_deg = float(a_m.group(1))
+            # chord
+            dx, dy = (ex - sx), (ey - sy)
+            c = math.hypot(dx, dy)
+            if c < 1e-12 or abs(ang_deg) < 1e-9:
+                # degenerate: fall back to simple midpoint
+                mx, my = (sx + ex) / 2.0, (sy + ey) / 2.0
+            else:
+                phi = math.radians(abs(ang_deg))  # central angle magnitude
+                # radius & sagitta
+                sin_half = math.sin(phi / 2.0)
+                if abs(sin_half) < 1e-12:
+                    mx, my = (sx + ex) / 2.0, (sy + ey) / 2.0
+                else:
+                    R = c / (2.0 * sin_half)
+                    s = R * (1.0 - math.cos(phi / 2.0))  # <-- correct sagitta
+                    # chord midpoint
+                    cx, cy = (sx + ex) / 2.0, (sy + ey) / 2.0
+                    # unit normal (rotate chord by +90°)
+                    nx, ny = (-dy / c, dx / c)
+                    # angle sign picks which side of the chord
+                    sign = -1.0 if ang_deg < 0 else 1.0
+                    mx, my = cx + sign * s * nx, cy + sign * s * ny
+            mid_str = f"(mid {mx:g} {my:g})"
+            # remove (angle …) and insert (mid …)
+            block = re.sub(r'\(angle\s+[^\)]+\)', '', block)
+            # Insert mid next to start for stability; we'll reorder later
+            block = block.replace(s_m.group(0), s_m.group(0) + " " + mid_str)
+
+        # Ensure we have mid now; if still no mid, create simple midpoint
+        if re.search(r'\(mid\s+[^)]*\)', block) is None:
+            mx, my = (sx + ex) / 2.0, (sy + ey) / 2.0
+            block = block.replace(s_m.group(0), s_m.group(0) + f" (mid {mx:g} {my:g})")
+
+        # Remove any leftover (angle …)
+        block = re.sub(r'\(angle\s+[^\)]+\)', '', block)
+
+        # Re-extract final tokens for ordering
+        s_m = re.search(r'\(start\s+[^)]*\)', block)
+        m_m = re.search(r'\(mid\s+[^)]*\)', block)
+        e_m = re.search(r'\(end\s+[^)]*\)', block)
+        L = L_m.group(1) if L_m else 'F.SilkS'
+        W = W_m.group(1) if W_m else '0.15'
+
+        if not (s_m and m_m and e_m):
+            return block  # something odd; leave unchanged
+
+        return f"(fp_arc {s_m.group(0)} {m_m.group(0)} {e_m.group(0)} (layer {L}) (width {W}))"
+
+    # --- find balanced (fp_arc …) blocks -------------------------------------
+    def match_paren(s: str, pos: int) -> int:
+        depth = 0
+        i = pos
+        while i < len(s):
+            c = s[i]
+            if c == '(':
+                depth += 1
+            elif c == ')':
+                depth -= 1
+                if depth == 0:
+                    return i
+            i += 1
+        return -1
+
+    spans = []
+    i = 0
+    n = len(text)
+    while i < n:
+        j = text.find('(fp_arc', i)
+        if j == -1:
+            break
+        k = match_paren(text, j)
+        if k == -1:
+            break
+        spans.append((j, k + 1))
+        i = k + 1
+
+    # rebuild from the end to keep indices stable
+    out = []
+    last = 0
+    for a, b in spans:
+        out.append(text[last:a])
+        out.append(rebuild_arc(text[a:b]))
+        last = b
+    out.append(text[last:])
+    new_text = ''.join(out)
+
+    # tiny cleanups
+    new_text = re.sub(r'\(\s+fp_arc', '(fp_arc', new_text)
+    new_text = re.sub(r'\s+\)', ')', new_text)
+    return new_text
 
 
 
@@ -877,8 +1093,10 @@ def process_zip(zip_file, rename_assets: bool = False, use_symbol_name: bool = F
     - copy .stp models
     """
     if use_symbol_name:
-        logger.info(f"Using symbol name as footprint and 3D model name for {zip_file.name}")
-    
+        logger.info(
+            f"Using symbol name as footprint and 3D model name for {zip_file.name}"
+        )
+
     # Prep temp extraction dir
     zip_file = Path(str(zip_file).strip()).resolve()
     tempdir = (INPUT_ZIP_FOLDER / "temp_extracted").resolve()
@@ -940,7 +1158,9 @@ def process_zip(zip_file, rename_assets: bool = False, use_symbol_name: bool = F
     symbols_added = False
     for sym_file in symbol_files:
         logger.debug(f"Processing symbol file: {sym_file}")
-        if append_symbols_from_file(sym_file, rename_assets=(rename_assets or use_symbol_name)):
+        if append_symbols_from_file(
+            sym_file, rename_assets=(rename_assets or use_symbol_name)
+        ):
             symbols_added = True
 
     if not symbols_added and not TEMP_MAP_FILE.exists():
@@ -961,9 +1181,7 @@ def process_zip(zip_file, rename_assets: bool = False, use_symbol_name: bool = F
         logger.info(f"Renaming of Footprints/3D Models ENABLED ({mode}).")
 
         rename_count = rename_extracted_assets(
-            tempdir,
-            footprint_map,
-            use_symbol_name=use_symbol_name
+            tempdir, footprint_map, use_symbol_name=use_symbol_name
         )
 
         if rename_count > 0 and TEMP_MAP_FILE.exists():
@@ -971,11 +1189,13 @@ def process_zip(zip_file, rename_assets: bool = False, use_symbol_name: bool = F
                 footprint_map = json.load(f)
         logger.info(f"Renamed {rename_count} assets.")
 
-
     # --- footprints ---
     project_version = detect_project_version(PROJECT_DIR)
-    dst_schema = KICAD8_SCHEMA if project_version < KICAD9_SCHEMA else KICAD9_FOOTPRINT_SCHEMA
-    logger.debug(f"Target project schema for footprints: {dst_schema}")
+    dst_schema = (
+        KICAD8_SCHEMA
+        if project_version < KICAD9_SCHEMA
+        else KICAD9_FOOTPRINT_SCHEMA
+    )
 
     for mod_file in kicad_root.rglob("*.kicad_mod"):
         dest = PROJECT_FOOTPRINT_LIB / mod_file.name
@@ -987,29 +1207,48 @@ def process_zip(zip_file, rename_assets: bool = False, use_symbol_name: bool = F
             with open(mod_file, "r", encoding="utf-8") as f:
                 mod_text = f.read()
 
-            # detect source schema from "(version NNNNN)"
+            # detect source schema
             src_schema = KICAD8_SCHEMA
-            match = re.search(r"\(version\s+(\d+)\)", mod_text)
-            if match:
+            mver = re.search(r"\(version\s+(\d+)\)", mod_text)
+            if mver:
                 try:
-                    src_schema = int(match.group(1))
+                    src_schema = int(mver.group(1))
                 except ValueError:
                     pass
 
-            logger.debug(f"Converting {mod_file.name}: {src_schema} → {dst_schema}")
-
+            # Normalize version/root
             if src_schema != dst_schema:
                 mod_text = force_footprint_version(mod_text, dst_schema)
-            else:
-                logger.info(f"{mod_file.name} already matches target schema.")
 
-            # localize 3D model path using final text
+            # Fix arcs (KiCad 9 only)
+            if dst_schema >= KICAD9_FOOTPRINT_SCHEMA:
+                before = mod_text.count("(angle")
+                mod_text = fix_all_fp_arcs(mod_text)
+                after = mod_text.count("(angle")
+                logger.info(f"{mod_file.name}: converted {before - after} arc(s)")
+
+            # --- Localize 3D paths first ---
             mod_text = localize_3d_model_path(mod_file, footprint_map, mod_text)
 
+            # --- Then reset 3D model offsets (center models) ---
+            #   This ensures any large vendor offsets are zeroed
+            offset_pattern = re.compile(
+                r'\(at\s*\(\s*xyz\s+[-\d\.eE\s]+\)\)',
+                flags=re.IGNORECASE
+            )
+            if offset_pattern.search(mod_text):
+                mod_text = offset_pattern.sub('(at (xyz 0 0 0))', mod_text)
+                logger.debug(f"{mod_file.name}: normalized 3D model offset to (0,0,0)")
+
+
+            # Write final footprint
             with open(dest, "w", encoding="utf-8") as outf:
                 outf.write(mod_text)
 
-            logger.info(f'Added footprint "{mod_file.name}" (KiCad {"8" if dst_schema < KICAD9_SCHEMA else "9"} schema).')
+            logger.info(
+                f'Added footprint "{mod_file.name}" '
+                f'(KiCad {"8" if dst_schema < KICAD9_SCHEMA else "9"} schema).'
+            )
 
         except Exception as e:
             logger.error(f"[FAIL] Error processing footprint {mod_file.name}: {e}")
@@ -1037,6 +1276,8 @@ def process_zip(zip_file, rename_assets: bool = False, use_symbol_name: bool = F
         TEMP_MAP_FILE.unlink()
 
     logger.info(f"Finished importing {zip_file.name}")
+
+
 
 
 def purge_zip_contents(zip_path: Path):
@@ -1148,7 +1389,9 @@ def purge_zip_contents(zip_path: Path):
 
         stems_checked.add(stem)
 
-    logger.info(f"Deleted {deleted_fp_count} footprints from {PROJECT_FOOTPRINT_LIB.name}.")
+    logger.info(
+        f"Deleted {deleted_fp_count} footprints from {PROJECT_FOOTPRINT_LIB.name}."
+    )
 
     # remove .stp models
     deleted_3d_count = 0
@@ -1159,7 +1402,9 @@ def purge_zip_contents(zip_path: Path):
             stp_path.unlink()
             deleted_3d_count += 1
 
-    logger.info(f"Deleted {deleted_3d_count} 3D model files from {PROJECT_3D_DIR.name}.")
+    logger.info(
+        f"Deleted {deleted_3d_count} 3D model files from {PROJECT_3D_DIR.name}."
+    )
 
     shutil.rmtree(tempdir)
 
@@ -1229,7 +1474,9 @@ def export_symbols(selected_symbols: list[str]) -> list[Path]:
                     found_fp = fp
                     break
             if not found_fp:
-                logger.warning(f"Footprint '{footprint_basename}' not found for {sym}, skipping.")
+                logger.warning(
+                    f"Footprint '{footprint_basename}' not found for {sym}, skipping."
+                )
                 continue
 
             # extract symbol definition
@@ -1244,7 +1491,9 @@ def export_symbols(selected_symbols: list[str]) -> list[Path]:
                     single_symbol_sexpr = el
                     break
             if not single_symbol_sexpr:
-                logger.warning(f"Symbol '{sym}' not found in {PROJECT_SYMBOL_LIB.name}.")
+                logger.warning(
+                    f"Symbol '{sym}' not found in {PROJECT_SYMBOL_LIB.name}."
+                )
                 continue
 
             # prep temp layout for this export
@@ -1262,7 +1511,9 @@ def export_symbols(selected_symbols: list[str]) -> list[Path]:
             # write symbol file
             symbol_out = kicad_folder / f"{part_name}.kicad_sym"
             with open(symbol_out, "w", encoding="utf-8") as f:
-                f.write("(kicad_symbol_lib (version 20211014) (generator CSE-Manager)\n")
+                f.write(
+                    "(kicad_symbol_lib (version 20211014) (generator CSE-Manager)\n"
+                )
                 f.write("  " + dumps(single_symbol_sexpr, pretty_print=True) + "\n)\n")
 
             # copy footprint
@@ -1296,9 +1547,13 @@ def export_symbols(selected_symbols: list[str]) -> list[Path]:
             resolved_models = []
             for block in model_blocks:
                 try:
-                    m = re.search(r'["\']?([^"\']+\.stp)["\']?', block, flags=re.IGNORECASE)
+                    m = re.search(
+                        r'["\']?([^"\']+\.stp)["\']?', block, flags=re.IGNORECASE
+                    )
                     if not m:
-                        logger.warning(f"Could not extract model path from block: {block[:80]}...")
+                        logger.warning(
+                            f"Could not extract model path from block: {block[:80]}..."
+                        )
                         continue
 
                     raw_path = m.group(1).replace("\\", "/")
@@ -1318,17 +1573,23 @@ def export_symbols(selected_symbols: list[str]) -> list[Path]:
                     kiprojmod_root = PROJECT_SYMBOL_LIB.parent.parent
 
                     if "${KIPRJMOD}" in str(model_path):
-                        model_path = Path(str(model_path).replace("${KIPRJMOD}", str(kiprojmod_root)))
+                        model_path = Path(
+                            str(model_path).replace("${KIPRJMOD}", str(kiprojmod_root))
+                        )
 
                     if model_path.exists():
                         resolved_models.append(model_path)
                         logger.debug(f"Found 3D model for {sym}: {model_path}")
                     else:
                         # try relative to footprint dir
-                        rel_model = (PROJECT_FOOTPRINT_LIB.parent / model_path.name).resolve()
+                        rel_model = (
+                            PROJECT_FOOTPRINT_LIB.parent / model_path.name
+                        ).resolve()
                         if rel_model.exists():
                             resolved_models.append(rel_model)
-                            logger.debug(f"Found relative 3D model for {sym}: {rel_model}")
+                            logger.debug(
+                                f"Found relative 3D model for {sym}: {rel_model}"
+                            )
                         else:
                             logger.warning(f"3D model not found: {model_path}")
 
@@ -1370,7 +1631,9 @@ def export_symbols(selected_symbols: list[str]) -> list[Path]:
 
 load_dotenv()
 
-_base_path = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
+_base_path = (
+    Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
+)
 
 project_file = find_upward("*.kicad_pro", _base_path)
 if not project_file:
@@ -1385,7 +1648,9 @@ PROJECT_FOOTPRINT_LIB_NAME = PROJECT_FOOTPRINT_LIB.stem
 input_folder_name = os.getenv("INPUT_ZIP_FOLDER", "library_input")
 INPUT_ZIP_FOLDER = find_upward(input_folder_name, _base_path)
 if INPUT_ZIP_FOLDER is None:
-    raise RuntimeError(f'Input folder "{input_folder_name}" not found in current or parent directories.')
+    raise RuntimeError(
+        f'Input folder "{input_folder_name}" not found in current or parent directories.'
+    )
 
 TEMP_MAP_FILE = INPUT_ZIP_FOLDER / "footprint_to_symbol_map.json"
 

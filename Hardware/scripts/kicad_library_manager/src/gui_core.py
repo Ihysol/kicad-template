@@ -39,7 +39,7 @@ logger = logging.getLogger("kicad_library_manager")
 # =========================
 # Globals 
 # =========================
-APP_VERSION = "v1.0"
+APP_VERSION = "v1.0a"
 FONT_SIZE = 18
 
 # cache of main symbols already in the project library
