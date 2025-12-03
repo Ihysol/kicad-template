@@ -1073,6 +1073,13 @@ def on_tab_change(dpg, sender=None, app_data=None, user_data=None):
         if dpg.does_item_exist("symbol_action_group"):
             dpg.hide_item("symbol_action_group")
         logger.info("Switched to DRC Manager tab.")
+        
+    elif "mouser" in active:
+        if dpg.does_item_exist("zip_action_group"):
+            dpg.hide_item("zip_action_group")
+        if dpg.does_item_exist("symbol_action_group"):
+            dpg.hide_item("symbol_action_group")
+        logger.info("Switched to Mouser Auto Order tab.")
 
     else:
         if dpg.does_item_exist("zip_action_group"):

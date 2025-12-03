@@ -1,6 +1,8 @@
+import time
 import wx
 import wx.dataview as dv
 from pathlib import Path
+import mouser_integration as mouser
 import threading
 import sys
 
@@ -152,6 +154,8 @@ class DpgShim:
                 return "symbol_tab"
             elif sel == 2:
                 return "drc_tab"
+            elif sel == 3:
+                return "mouser_tab"
             return ""
         return self._values.get(tag, 0)
 
@@ -200,6 +204,7 @@ class DpgShim:
         if tag == "symbol_tab": return "Export Project Symbols"
         if tag == "zip_tab": return "Import ZIP Archives"
         if tag == "drc_tab": return "DRC Manager"
+        if tag == "mouser_tab": return "Mouser Auto Order"
         return str(tag)
 
     def get_item_children(self, tag, slot): return []
@@ -329,9 +334,11 @@ class MainFrame(wx.Frame):
         self.tab_zip = wx.Panel(self.notebook)
         self.tab_symbol = wx.Panel(self.notebook)
         self.tab_drc = wx.Panel(self.notebook)
+        self.tab_mouser = MouserAutoOrderTab(self.notebook, log_callback=self.append_log)
         self.notebook.AddPage(self.tab_zip, "Import ZIP Archives")
         self.notebook.AddPage(self.tab_symbol, "Export Project Symbols")
         self.notebook.AddPage(self.tab_drc, "DRC Manager")
+        self.notebook.AddPage(self.tab_mouser, "Mouser Auto Order")
         vbox.Add(self.notebook, 1, wx.EXPAND | wx.ALL, 8)
 
         # --- ZIP tab content ---
@@ -801,10 +808,260 @@ class MainFrame(wx.Frame):
 
         elif "DRC" in tab_label:
             self.append_log("[INFO] DRC Manager ready.")
+            
+        elif "MOUSER" in tab_label:
+            self.append_log("[INFO] Mouser Auto Order ready.")
 
         # Keep original backend behavior
         on_tab_change(self.shim)
         event.Skip()
+
+class MouserAutoOrderTab(wx.Panel):
+    """Tab to load BOM CSV, filter items and submit order via Mouser API (in-tab GUI)."""
+
+    def __init__(self, parent, log_callback=None):
+        """
+        Initialize the panel with controls for loading BOM, selecting columns,
+        setting multiplier, and submitting orders. Also sets up the data view.
+        """
+        super().__init__(parent)
+        self.log_callback = log_callback
+        self.bom_handler = mouser.BOMHandler() # BOM parsing utility
+        self.order_client = mouser.MouserOrderClient() # Mouser order API client
+        self.current_bom_file = None
+        self.current_data_array = None
+
+        s = wx.BoxSizer(wx.VERTICAL)
+
+        # Top controls
+        top = wx.BoxSizer(wx.HORIZONTAL)
+        self.btn_open_bom = wx.Button(self, label="Open BOM CSV...")
+        self.btn_open_bom.SetToolTip("Open a BOM CSV file to load parts from.")
+        self.btn_reload = wx.Button(self, label="Reload BOM")
+        self.btn_reload.SetToolTip(
+            "Reload the currently opened BOM file. If changes were made externally, they will be reflected."
+        )
+        self.btn_submit = wx.Button(self, label="Submit Cart to Mouser")
+        self.btn_submit.SetToolTip(
+            "Submit the current selection to Mouser shopping cart via API.\n\n"
+            "Make sure that your API key is set in the environment variables and account details contains your address to show EUR currency in Logger."
+        )
+        
+        # Set button icons
+        self.btn_open_bom.SetBitmap(wx.ArtProvider.GetBitmap(wx.ART_FOLDER_OPEN, wx.ART_BUTTON, (16,16)), wx.RIGHT)
+        self.btn_reload.SetBitmap(wx.ArtProvider.GetBitmap(wx.ART_UNDO, wx.ART_BUTTON, (16,16)), wx.RIGHT)
+        self.btn_submit.SetBitmap(wx.ArtProvider.GetBitmap(wx.ART_GO_DIR_UP, wx.ART_BUTTON, (16,16)), wx.RIGHT)
+
+        top.Add(self.btn_open_bom, 1, wx.EXPAND | wx.RIGHT, 6)
+        top.Add(self.btn_reload, 1, wx.EXPAND | wx.RIGHT, 6)
+        top.Add(self.btn_submit, 1, wx.EXPAND)
+        s.Add(top, 0, wx.ALL, 0)
+        s.AddSpacer(10)
+
+        # ---------- Configuration row: MNR column selection + multiplier ----------
+        cfg = wx.BoxSizer(wx.HORIZONTAL)
+        lbl_mnr_column = wx.StaticText(self, label="Select Mouser Number Column:")
+        lbl_mnr_column.SetToolTip("Select which column in the BOM contains the Mouser Part Numbers.")
+        cfg.Add(lbl_mnr_column, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 0)
+        
+        self.choice_mnr = wx.ComboBox(self, choices=[], style=wx.CB_READONLY)
+        cfg.Add(self.choice_mnr, 0, wx.RIGHT, 12)
+
+        lbl_multiplier = wx.StaticText(self, label="Multiplier:")
+        lbl_multiplier.SetToolTip("Number of parts to order, e.g. 5: order 5x the BOM quantity for 5 PCBs.")
+        cfg.Add(lbl_multiplier, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 0)
+        self.multiplier = wx.SpinCtrl(self, min=1, max=1000, initial=5)
+        cfg.Add(self.multiplier, 0, wx.RIGHT, 12)
+
+        s.Add(cfg, 0, wx.ALL | wx.EXPAND, 0)
+        s.AddSpacer(10)
+        
+        # ---------- Label for excluded components ----------
+        self.label_dv_header = wx.StaticText(self, label="Unwanted components (mark to exclude):")
+        self.label_dv_header.SetToolTip("Select which components to exclude from the order by checking their boxes.")
+        s.Add(self.label_dv_header, 0, wx.LEFT | wx.RIGHT | wx.TOP, 0)
+
+        # ---------- DataView for BOM rows ----------
+        self.dv = dv.DataViewListCtrl(self, style=dv.DV_ROW_LINES | dv.DV_VERT_RULES)
+        self.col_exclude = self.dv.AppendToggleColumn("", width=40) # Checkbox to exclude items
+        self.col_ref     = self.dv.AppendTextColumn("Reference", width=250)
+        self.col_mnr     = self.dv.AppendTextColumn("Mouser Number", width=200)
+        self.col_qty     = self.dv.AppendTextColumn("Qty", width=80)
+        s.Add(self.dv, 1, wx.EXPAND | wx.ALL, 0)
+
+        self.SetSizer(s)
+
+        # ---------- Bind events ----------
+        self.btn_open_bom.Bind(wx.EVT_BUTTON, self.on_open_bom)
+        self.btn_reload.Bind(wx.EVT_BUTTON, self.on_reload_bom)
+        self.btn_submit.Bind(wx.EVT_BUTTON, self.on_submit_order)
+        self.choice_mnr.Bind(wx.EVT_COMBOBOX, self.on_mnr_changed)
+
+    # ---------- Logging helper ----------
+    def log(self, text):
+        """Log to panel and optionally forward to main logger."""
+        if self.log_callback:
+            try:
+                self.log_callback(text)
+            except Exception:
+                pass
+
+    # ---------- Event handlers ----------
+    def on_open_bom(self, evt):
+        """Open file dialog to pick a BOM CSV file and load it."""
+        with wx.FileDialog(self, "Open BOM CSV", wildcard="CSV files (*.csv)|*.csv",
+                            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,) as fdg:
+            if fdg.ShowModal() != wx.ID_OK:
+                return
+            path = fdg.GetPath()
+            self.current_bom_file = path
+            self.load_bom(path)
+
+
+    def on_reload_bom(self, evt):
+        """Reload the current BOM file to refresh data in case of external edits."""
+        if not self.current_bom_file:
+            self.log("[WARN] No BOM file selected to reload.")
+            return
+        self.load_bom(self.current_bom_file)
+
+    def load_bom(self, bom_path):
+        """
+        Load BOM CSV using BOMHandler, populate MNR choices and DataView.
+        """
+        try:
+            self.log(f"[INFO] Loading BOM: {bom_path}")
+            data = self.bom_handler.process_bom_file(bom_path)
+            
+            # Ensure required headers exist
+            headers = list(data.keys())
+            if "Reference" not in headers or "Qty" not in headers:
+                self.log("[ERROR] BOM missing required columns (Reference/Qty).")
+                return
+            
+            # Build MNR choices: any header except Reference/Qty
+            choices = [h for h in headers if h not in ("Reference", "Qty")]
+            if not choices:
+                choices = [mouser.CSV_MOUSER_COLUMN_NAME] # fallback: default MNR column name
+            self.choice_mnr.Clear()
+            self.choice_mnr.AppendItems(choices)
+            self.choice_mnr.SetSelection(0)
+            self.multiplier.SetValue(5) # reset multiplier to default
+
+            self.current_data_array = data
+            
+            # Populate DataView
+            self.dv.GetStore().DeleteAllItems()
+            mnr_col = self.choice_mnr.GetValue() or choices[0]
+            self.col_mnr.SetTitle(mnr_col)
+            refs = data.get("Reference", [])
+            mnrs = data.get(mnr_col, [""] * len(refs))
+            qtys = data.get("Qty", [""] * len(refs))
+            for ref, mnr, qty in zip(refs, mnrs, qtys):
+                self.dv.GetStore().AppendItem([False, str(ref), str(mnr), str(qty)])
+                
+            self.log(f"[OK] Loaded {len(refs)} BOM rows.")
+        except Exception as e:
+            self.log(f"[ERROR] Failed to load BOM: {e}")
+            
+    def on_mnr_changed(self, evt):
+        """Update DataView column when user selects a different MNR column."""
+        if not self.current_data_array:
+            return
+
+        mnr_col = self.choice_mnr.GetValue()
+        self.col_mnr.SetTitle(mnr_col)
+        
+        store = self.dv.GetStore()
+        store.DeleteAllItems()
+
+        refs = self.current_data_array.get("Reference", [])
+        mnrs = self.current_data_array.get(mnr_col, [""] * len(refs))
+        qtys = self.current_data_array.get("Qty", [""] * len(refs))
+
+        for ref, mnr, qty in zip(refs, mnrs, qtys):
+            store.AppendItem([False, str(ref), str(mnr), str(qty)])
+
+    # ---------- Data preparation ----------
+    def collect_selected_for_order(self):
+        """
+        Collect data from DataView excluding items marked as excluded.
+        Returns a dict compatible with MouserOrderClient.
+        """
+        store = self.dv.GetStore()
+        refs, mnrs, qtys = [], [], []
+        col_mnr_name = self.choice_mnr.GetValue() or mouser.CSV_MOUSER_COLUMN_NAME
+        for row in range(store.GetCount()):
+            excluded = store.GetValueByRow(row, 0)
+            if excluded:
+                continue
+            refs.append(store.GetValueByRow(row, 1))
+            mnrs.append(store.GetValueByRow(row, 2))
+            qtys.append(store.GetValueByRow(row, 3))
+        return {
+            "Reference": refs,
+            col_mnr_name: mnrs,
+            "MNR_Column_Name": col_mnr_name,
+            "Qty": qtys,
+            "Multiplier": int(self.multiplier.GetValue() or 1),
+        }
+
+    def on_submit_order(self, evt):
+        """Submit selected BOM items to Mouser cart using a background thread."""
+        if not self.current_data_array:
+            self.log("[WARN] No BOM loaded.")
+            return
+
+        data_for_order = self.collect_selected_for_order()
+        if not data_for_order["Reference"]:
+            self.log("[WARN] No items selected for ordering.")
+            return
+
+        t = threading.Thread(target=self._run_order_thread, args=(data_for_order,), daemon=True)
+        t.start()
+    
+    def _run_order_thread(self, data_for_order):
+        """
+        Run order submission in background thread.
+        Redirect stdout/stderr to GUI log, retry API requests on failure.
+        """
+        import sys as _sys
+        
+        class GuiWriter:
+            """Redirect stdout/stderr to GUI log callback."""
+            def __init__(self, write_fn):
+                self.write_fn = write_fn
+            def write(self, s):
+                if s is None:
+                    return
+                for line in str(s).splitlines():
+                    if line.strip() != "":
+                        wx.CallAfter(self.write_fn, line)
+            def flush(self): pass
+
+        old_stdout, old_stderr = _sys.stdout, _sys.stderr
+        _sys.stdout, _sys.stderr = GuiWriter(self.log), GuiWriter(self.log)
+
+        try:
+            # Retry mechanism for API submission
+            attempts = 0
+            success = False
+            for attempts in range(mouser.API_TIMEOUT_MAX_RETRIES):
+                self.log(f"Attempt {attempts+1}/{mouser.API_TIMEOUT_MAX_RETRIES}")
+                try:
+                    ok = self.order_client.order_parts_from_data_array(dict(data_for_order))
+                except Exception as e:
+                    ok = False
+                    self.log(f"Exception during order attempt: {e}")
+                if ok:
+                    success = True
+                    break
+                if attempts < mouser.API_TIMEOUT_MAX_RETRIES - 1:
+                    self.log(f"Attempt failed. Retrying in {mouser.API_TIMEOUT_SLEEP_S} s...")
+                    time.sleep(mouser.API_TIMEOUT_SLEEP_S)
+            self.log(f"[INFO] Final result: Attempts → {attempts+1}, Success → {success}")
+        finally:
+            _sys.stdout, _sys.stderr = old_stdout, old_stderr
 
 
 # --- Patch backend ZIP selection handling for DataViewListCtrl ---
