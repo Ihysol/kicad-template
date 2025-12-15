@@ -1,47 +1,49 @@
-# CSE Manager GUI
+# KiCad Library Manager (wxPython)
 
-**CSE Manager** is a GUI tool designed to automate the import and management of electronic components from [componentsearchengine.com](https://componentsearchengine.com/) into your KiCad project.
+wxPython-based GUI and CLI for importing, purging, and exporting component ZIPs into this KiCad template.
 
 ---
 
 ## Features
 
-* Import components from `.zip` files downloaded from componentsearchengine.com
-* Automatically generate KiCad symbols, footprints, and library links
-* Export parts to the correct project folders in this template
-* GUI-based workflow; no command-line interaction required (optional: `cli_main.py`)
+* Import component `.zip` archives into project symbol/footprint libraries
+* Purge previously imported parts
+* Export project symbols (with footprint/3D validation)
+* DRC template updater and Mouser Auto Order tab
+* GUI-first (`gui_wx.py`) with a companion CLI (`cli_main.py`)
 
 ---
 
 ## Usage
 
-* Use the `cse_manager.exe` or install dependencies manually and run `gui_app.py` (or `cli_main.py`)
-* The script will look for `.zip` files in the folder specified in the `.env` file (default: `library_input`)
-
-### Run the GUI
-
-```bash
-pip install -r requirements.txt
-python3 gui_app.py
-```
-
-Or run the standalone executable (`cse_manager.exe` on Windows or `cse_manager` on Linux).
+* Install dependencies and run the wx GUI:
+  ```bash
+  pip install -r requirements.txt
+  python gui_wx.py
+  ```
+* Or run the CLI:
+  ```bash
+  python cli_main.py process path\\to\\part.zip --use-symbol-name
+  python cli_main.py purge path\\to\\part.zip
+  python cli_main.py export --symbols U1 U2
+  ```
+* ZIPs are read from the `library_input` folder (or the folder you pick inside the GUI).
 
 ### Workflow
 
-1. Browse or search for the desired component on [componentsearchengine.com](https://componentsearchengine.com/).
-2. Download and put the `.zip` files in the folder specified in `.env` (default: `library_input`).
-3. Launch the GUI (or press the refresh button if already running).
-4. Select the desired parts from the list and press the **Process** button.
-5. The GUI will place symbols, footprints, and update library references automatically.
-
-> **Note:** Parts already present in the project (determined by name comparison in `.kicad_sym` files) will be deselected by default to prevent overwriting. To re-import such a component, you must purge it first.
+1. Drop or select `.zip` files into `library_input` (or choose a folder in the GUI).
+2. Launch the GUI, pick ZIPs to import, and press **PROCESS / IMPORT**.
+3. Use **PURGE / DELETE** to remove a part before re-importing.
+4. Switch to **Export Project Symbols** to export selected symbols into ZIPs.
+5. DRC tab applies the correct `.kicad_dru` template based on PCB layer count.
 
 ---
 
 ## Folder Structure
 
-* **library_input/** – Folder for `.zip` files or component definitions to be imported. `.zip` files here are ignored by Git.
+* **library_input/** – Folder for `.zip` files or component definitions to be imported (default source).
+* **library_output/** – Destination for exported ZIPs.
+* **dru_templates/** – DRC templates consumed by the DRC tab.
 
 ## Build the executable
 

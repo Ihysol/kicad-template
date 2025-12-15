@@ -1,27 +1,24 @@
+import sys
+import threading
 import time
+from pathlib import Path
+
+import mouser_integration as mouser
 import wx
 import wx.dataview as dv
-from pathlib import Path
-import mouser_integration as mouser
-import threading
-import sys
 
 from gui_core import (
     APP_VERSION,
+    USE_SYMBOLNAME_KEY,
+    export_symbols_with_checks,
+    list_project_symbols,
     load_config,
-    save_config,
-    clear_log,
-    process_action,
-    export_action,
-    update_drc_rules,
-    refresh_file_list,
-    show_native_folder_dialog,
     open_folder_in_explorer,
     open_output_folder,
-    toggle_selection_mode,
-    initial_load,
-    on_tab_change,
-    USE_SYMBOLNAME_KEY
+    process_archives,
+    save_config,
+    scan_zip_folder,
+    update_drc_rules,
 )
 from library_manager import INPUT_ZIP_FOLDER
 
@@ -105,17 +102,15 @@ class ZipFileDropTarget(wx.FileDropTarget):
 
     def OnDropFiles(self, x, y, filenames):
         import shutil
-        from pathlib import Path
-        from gui_core import refresh_file_list
-        from library_manager import INPUT_ZIP_FOLDER
 
         dropped = []
-        INPUT_ZIP_FOLDER.mkdir(parents=True, exist_ok=True)
+        target_dir = self.parent.current_folder
+        target_dir.mkdir(parents=True, exist_ok=True)
 
         for f in filenames:
             p = Path(f)
             if p.is_file() and p.suffix.lower() == ".zip":
-                target = INPUT_ZIP_FOLDER / p.name
+                target = target_dir / p.name
                 try:
                     if target != p:
                         shutil.copy2(p, target)
@@ -125,200 +120,44 @@ class ZipFileDropTarget(wx.FileDropTarget):
 
         if dropped:
             wx.CallAfter(self.parent.append_log, f"[OK] Added {len(dropped)} ZIP archive(s).")
-            wx.CallAfter(refresh_file_list, self.parent.shim)
+            wx.CallAfter(self.parent.refresh_zip_list)
 
         return True
 
 
 
 
-# ===============================
-# DearPyGui compatibility shim
-# ===============================
-class DpgShim:
-    """Compatibility layer so gui_core calls work with wxPython."""
-
-    def __init__(self, gui):
-        self.gui = gui
-        self._uuid_counter = 0
-        self._values = {"scroll_flag_int": 0, "current_path_text": ""}
-        self._visible = set()
-
-    # ----- storage / values -----
-    def set_value(self, tag, value):
-        self._values[tag] = value
-        self.gui.set_value(tag, value)
-
-    def get_value(self, tag):
-        # Simulate DPG tags for backend compatibility
-        if tag == "use_symbol_name_chkbox":
-            return self.chk_use_symbol_name.GetValue()
-        if tag == "current_path_text":
-            return self._values.get(tag, self.gui.current_folder_txt.GetLabel())
-        if tag == "source_tab_bar":
-            sel = self.gui.notebook.GetSelection()
-            if sel == 0:
-                return "zip_tab"
-            elif sel == 1:
-                return "symbol_tab"
-            elif sel == 2:
-                return "drc_tab"
-            elif sel == 3:
-                return "mouser_tab"
-            return ""
-        return self._values.get(tag, 0)
-
-    def does_item_exist(self, tag):
-        return True
-
-    # ----- logging -----
-    def add_text(self, text, **kwargs):
-        if text:
-            self.gui.append_log(text)
-
-    def add_input_text(self, default_value="", **kwargs):
-        if default_value:
-            self.gui.append_log(default_value)
-        return self.generate_uuid()
-
-    def bind_item_theme(self, *args, **kwargs): pass
-    def set_y_scroll(self, *args, **kwargs): pass
-
-    def generate_uuid(self):
-        self._uuid_counter += 1
-        return f"wx_uuid_{self._uuid_counter}"
-
-    # ----- visibility -----
-    def show_item(self, tag):
-        self._visible.add(tag)
-        self.gui.show_section(tag, True)
-
-    def hide_item(self, tag):
-        if tag in self._visible:
-            self._visible.remove(tag)
-        self.gui.show_section(tag, False)
-
-    # ----- minimal layout mocks -----
-    def group(self, *args, **kwargs):
-        class DummyCtx:
-            def __enter__(self_): return None
-            def __exit__(self_, exc_type, exc, tb): return False
-        return DummyCtx()
-
-    def add_checkbox(self, *args, **kwargs): return self.generate_uuid()
-    def add_button(self, *args, **kwargs): return self.generate_uuid()
-    def add_separator(self, *args, **kwargs): return self.generate_uuid()
-    def add_child_window(self, *args, **kwargs): return self.generate_uuid()
-    def get_item_label(self, tag):
-        if tag == "symbol_tab": return "Export Project Symbols"
-        if tag == "zip_tab": return "Import ZIP Archives"
-        if tag == "drc_tab": return "DRC Manager"
-        if tag == "mouser_tab": return "Mouser Auto Order"
-        return str(tag)
-
-    def get_item_children(self, tag, slot): return []
-    def get_item_type(self, tag): return "mvAppItemType::mvCheckbox"
-    def set_item_label(self, tag, label): pass
-
-    def delete_item(self, tag, children_only=False):
-        if tag == "log_text_container":
-            self.gui.clear_log()
-
-    def refresh_symbol_list(self, *args, **kwargs):
-        try:
-            from gui_core import list_project_symbols
-            symbols = list_project_symbols()
-        except Exception:
-            symbols = []
-        if hasattr(self.gui, "symbol_list"):
-            lst = self.gui.symbol_list
-            lst.Clear()
-            for sym in symbols:
-                lst.Append(sym)
-                
-    def _make_status_icon(self, colour: wx.Colour, size=12):
-        """Create a small coloured square bitmap for status indicators."""
-        bmp = wx.Bitmap(size, size)
-        dc = wx.MemoryDC(bmp)
-        dc.SetBrush(wx.Brush(colour))
-        dc.SetPen(wx.TRANSPARENT_PEN)
-        dc.DrawRectangle(0, 0, size, size)
-        dc.SelectObject(wx.NullBitmap)
-        return bmp
-
-    # ----- file/symbol list hooks -----
-    def build_file_list_ui(self, *args, **kwargs):
-        """Populate DataView list with coloured bitmap status icons + text."""
-        try:
-            from gui_core import GUI_FILE_DATA
-        except Exception:
-            return
-
-        lst = self.gui.zip_file_list
-        model = lst.GetStore()
-        model.DeleteAllItems()
-
-        # Map backend statuses to colours + display text
-        status_styles = {
-            "NEW":              (wx.Colour(0, 255, 0),       "NEW"),
-            "PARTIAL":          (wx.Colour(255, 160, 0),     "IN PROJECT"),
-            "MISSING_SYMBOL":   (wx.Colour(255, 80, 80),     "Missing Symbol (cannot import)"),
-            "MISSING_FOOTPRINT":(wx.Colour(255, 80, 80),     "Missing Footprint (cannot import)"),
-            "ERROR":            (wx.Colour(255, 80, 80),     "ERROR"),
-            "NONE":             (wx.Colour(180, 180, 180),   "MISSING"),
-        }
-
-        for row in GUI_FILE_DATA:
-            name = row.get("name", "unknown.zip")
-            raw_status = row.get("status", "")
-            colour, text = status_styles.get(raw_status, (wx.Colour(180, 180, 180), raw_status or "—"))
-
-            # Disabled (invalid) if missing symbol or footprint
-            is_disabled = raw_status in ("MISSING_SYMBOL", "MISSING_FOOTPRINT")
-
-            icon = self._make_status_icon(colour)
-            icontext = wx.dataview.DataViewIconText(f" {text}", icon)
-
-            # Checkbox value = False if disabled (so cannot be imported)
-            # “Delete” column still available.
-            model.AppendItem([not is_disabled and raw_status != "PARTIAL", name, icontext, "double-click to delete"])
-
-
-
-
-    # Hook into gui_ui so backend calls are redirected to wxPython
-    import types, sys
-
-    # Create a dummy module "gui_ui" dynamically
-    gui_ui = types.ModuleType("gui_ui")
-    sys.modules["gui_ui"] = gui_ui
-
-    # Redirect backend functions to wx equivalents
-    gui_ui.build_file_list_ui = lambda dpg: dpg.build_file_list_ui()
-    gui_ui.refresh_symbol_list = lambda dpg: dpg.refresh_symbol_list()
 
 # ===============================
 # Main GUI Frame
 # ===============================
 class MainFrame(wx.Frame):
     def __init__(self):
-        super().__init__(None, title=f"KiCad Library Manager (wxPython) — {APP_VERSION}", size=(980, 800))
-        self.shim = DpgShim(self)
-        self._values = {}
+        super().__init__(None, title=f"KiCad Library Manager (wxPython) - {APP_VERSION}", size=(980, 800))
+        self.current_folder = INPUT_ZIP_FOLDER.resolve()
+        self.zip_rows = []
         self.InitUI()
-        self.Centre()
-        self.Show()
-        initial_load(self.shim)
+        self._configure_logger()
+
         cfg = load_config()
         self.chk_use_symbol_name.SetValue(cfg.get(USE_SYMBOLNAME_KEY, False))
-        # --- logger setup (only add once) ---
+
+        self.refresh_zip_list()
+        self.refresh_symbol_list()
+
+        self.Centre()
+        self.Show()
+
+    def _configure_logger(self):
+        """Attach GUI log handler once."""
         if not any(isinstance(h, WxGuiLogHandler) for h in logger.handlers):
             gui_handler = WxGuiLogHandler(self)
-            gui_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S"))
+            gui_handler.setFormatter(
+                logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S")
+            )
             logger.addHandler(gui_handler)
-            logger.propagate = False  # prevent double-printing via root logger
-
-        
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False  # prevent double-printing via root logger
     # ---------- Layout ----------
     def InitUI(self):
         panel = wx.Panel(self)
@@ -604,14 +443,7 @@ class MainFrame(wx.Frame):
         )
 
         # --- refresh export list (UI + backend sync) ---
-        def _refresh_ui():
-            try:
-                self.shim.refresh_symbol_list()  # <---- key fix: this is the wx-side repopulation
-                self.append_log("[OK] Export list refreshed.")
-            except Exception as e:
-                self.append_log(f"[WARN] Could not refresh symbol list: {e}")
-
-        wx.CallAfter(_refresh_ui)
+        wx.CallAfter(self.refresh_symbol_list)
 
 
     
@@ -631,13 +463,9 @@ class MainFrame(wx.Frame):
         if col != 3:
             return
 
-        from gui_core import GUI_FILE_DATA, refresh_file_list
-        from library_manager import INPUT_ZIP_FOLDER
-
-        if row >= len(GUI_FILE_DATA):
+        if row >= len(self.zip_rows):
             return
-        path = GUI_FILE_DATA[row]["path"]
-        zip_path = Path(path)
+        zip_path = Path(self.zip_rows[row].get("path", ""))
 
         # Confirm deletion
         dlg = wx.MessageDialog(
@@ -659,7 +487,7 @@ class MainFrame(wx.Frame):
             return
 
         # Refresh list immediately
-        refresh_file_list(self.shim)
+        self.refresh_zip_list()
 
     
     def on_zip_row_clicked(self, event):
@@ -683,9 +511,10 @@ class MainFrame(wx.Frame):
     
     def on_use_symbol_name_toggled(self, event):
         """Save preference to backend config."""
-        from gui_core import save_config, USE_SYMBOLNAME_KEY
         value = self.chk_use_symbol_name.IsChecked()
-        save_config(USE_SYMBOLNAME_KEY, value)
+        cfg = load_config()
+        cfg[USE_SYMBOLNAME_KEY] = value
+        save_config(cfg)
         state = "enabled" if value else "disabled"
         self.append_log(f"[INFO] 'Use symbol name as footprint/3D model' {state}.")
         
@@ -734,15 +563,10 @@ class MainFrame(wx.Frame):
 
     def on_refresh_symbols(self, event):
         self.append_log("[INFO] Refreshing symbols...")
-        try:
-            from gui_core import refresh_symbol_list
-            refresh_symbol_list(self.shim)
-            self.append_log("Symbol list refreshed.")
-        except Exception as e:
-            self.append_log(f"[ERROR] Failed to refresh symbols: {e}")
+        self.refresh_symbol_list()
 
     def on_refresh_zips(self, event):
-        refresh_file_list(self.shim)
+        self.refresh_zip_list()
 
     def on_master_symbols_toggle(self, event):
         checked = self.chk_master_symbols.IsChecked()
@@ -752,13 +576,6 @@ class MainFrame(wx.Frame):
         self.chk_master_symbols.SetLabel("Deselect All" if checked else "Select All")
         if event:
             event.Skip()
-
-    def set_value(self, tag, value):
-        if tag == "use_symbol_name_chkbox":
-            self.chk_use_symbol_name.SetValue(bool(value))
-        if tag == "current_path_text":
-            self.current_folder_txt.SetLabel(value)
-        self._values[tag] = value
 
     def append_log(self, text):
         if "[FAIL]" in text or "[ERROR]" in text:
@@ -775,29 +592,38 @@ class MainFrame(wx.Frame):
     def clear_log(self):
         self.log_ctrl.Clear()
 
-    def show_section(self, tag, visible: bool):
-        pass
-
     def on_select_zip_folder(self, event):
-        show_native_folder_dialog(self.shim)
+        dlg = wx.DirDialog(
+            self,
+            "Select Folder Containing ZIP Archives",
+            str(self.current_folder),
+            style=wx.DD_DIR_MUST_EXIST,
+        )
+        if dlg.ShowModal() == wx.ID_OK:
+            self.current_folder = Path(dlg.GetPath())
+            self.refresh_zip_list()
+        dlg.Destroy()
 
     def on_open_folder(self, event):
-        open_folder_in_explorer(self.shim)
+        open_folder_in_explorer(self.current_folder)
 
     def on_process(self, event):
-        process_action(self.shim, None, None, False)
+        self.run_process_action(is_purge=False)
 
     def on_purge(self, event):
-        process_action(self.shim, None, None, True)
+        self.run_process_action(is_purge=True)
 
     def on_export(self, event):
-        export_action(self.shim)
+        selected_symbols = self.collect_selected_symbols_for_export()
+        success, _ = export_symbols_with_checks(selected_symbols)
+        if success:
+            self.append_log("[OK] Export complete.")
 
     def on_open_output(self, event):
-        open_output_folder(self.shim)
+        open_output_folder()
 
     def on_drc_update(self, event):
-        update_drc_rules(self.shim)
+        update_drc_rules()
 
     def on_tab_changed(self, event):
         """Automatically refresh the correct list when switching tabs."""
@@ -811,30 +637,112 @@ class MainFrame(wx.Frame):
 
         if "Import ZIP" in tab_label:
             self.append_log("[INFO] Refreshing ZIP archive list...")
-            try:
-                refresh_file_list(self.shim)
-                self.append_log("[OK] ZIP archive list refreshed.")
-            except Exception as e:
-                self.append_log(f"[ERROR] Failed to refresh ZIP list: {e}")
+            self.refresh_zip_list()
+            self.append_log("[OK] ZIP archive list refreshed.")
 
         elif "Export Project" in tab_label:
             self.append_log("[INFO] Refreshing project symbol list...")
-            try:
-                from gui_core import refresh_symbol_list
-                refresh_symbol_list(self.shim)
-                self.append_log("[OK] Project symbol list refreshed.")
-            except Exception as e:
-                self.append_log(f"[ERROR] Failed to refresh symbol list: {e}")
+            self.refresh_symbol_list()
+            self.append_log("[OK] Project symbol list refreshed.")
 
         elif "DRC" in tab_label:
             self.append_log("[INFO] DRC Manager ready.")
-            
+
         elif "mouser" in tab_label.lower():
             self.append_log("[INFO] Mouser Auto Order ready.")
-
-        # Keep original backend behavior
-        on_tab_change(self.shim)
         event.Skip()
+
+    # ---------- Data helpers ----------
+    def _make_status_icon(self, colour: wx.Colour, size=12):
+        bmp = wx.Bitmap(size, size)
+        dc = wx.MemoryDC(bmp)
+        dc.SetBrush(wx.Brush(colour))
+        dc.SetPen(wx.TRANSPARENT_PEN)
+        dc.DrawRectangle(0, 0, size, size)
+        dc.SelectObject(wx.NullBitmap)
+        return bmp
+
+    def refresh_zip_list(self):
+        """Scan current folder and rebuild ZIP DataView list."""
+        self.current_folder.mkdir(parents=True, exist_ok=True)
+        self.current_folder_txt.SetLabel(f"Current Folder: {self.current_folder}")
+        self.zip_rows = scan_zip_folder(self.current_folder)
+
+        model = self.zip_file_list.GetStore()
+        model.DeleteAllItems()
+
+        status_styles = {
+            "NEW": (wx.Colour(0, 255, 0), "NEW"),
+            "PARTIAL": (wx.Colour(255, 160, 0), "IN PROJECT"),
+            "MISSING_SYMBOL": (wx.Colour(255, 80, 80), "Missing Symbol (cannot import)"),
+            "MISSING_FOOTPRINT": (wx.Colour(255, 80, 80), "Missing Footprint (cannot import)"),
+            "ERROR": (wx.Colour(255, 80, 80), "ERROR"),
+            "NONE": (wx.Colour(180, 180, 180), "MISSING"),
+        }
+
+        for row in self.zip_rows:
+            raw_status = row.get("status", "")
+            colour, text = status_styles.get(raw_status, (wx.Colour(180, 180, 180), raw_status or "-"))
+            is_disabled = raw_status in ("MISSING_SYMBOL", "MISSING_FOOTPRINT")
+            icontext = wx.dataview.DataViewIconText(f" {text}", self._make_status_icon(colour))
+            model.AppendItem(
+                [not is_disabled and raw_status != "PARTIAL", row.get("name", "unknown.zip"), icontext, "double-click to delete"]
+            )
+
+        self.chk_master_zip.SetValue(False)
+        self.chk_master_zip.SetLabel("Select All")
+        self.zip_file_list.Refresh()
+
+    def refresh_symbol_list(self):
+        symbols = list_project_symbols()
+        self.symbol_list.Clear()
+        for sym in symbols:
+            self.symbol_list.Append(sym)
+        self.chk_master_symbols.SetValue(False)
+        self.chk_master_symbols.SetLabel("Select All")
+
+    def collect_selected_symbols_for_export(self):
+        lst = self.symbol_list
+        return [lst.GetString(i) for i in range(lst.GetCount()) if lst.IsChecked(i)]
+
+    def _get_selected_zip_paths(self) -> list[Path]:
+        model = self.zip_file_list.GetStore()
+        selected: list[Path] = []
+        for i in range(model.GetCount()):
+            if not model.GetValueByRow(i, 0):
+                continue
+            if i >= len(self.zip_rows):
+                continue
+            entry = self.zip_rows[i]
+            status = entry.get("status", "")
+            if status in ("MISSING_SYMBOL", "MISSING_FOOTPRINT"):
+                self.append_log(f"[WARN] Skipping {entry.get('name','?')}: missing required files.")
+                continue
+            path = entry.get("path")
+            if path:
+                selected.append(Path(path))
+        if not selected:
+            self.append_log("[WARN] No valid ZIPs selected for import (must contain both symbol + footprint).")
+        return selected
+
+    def run_process_action(self, *, is_purge: bool):
+        active_files = self._get_selected_zip_paths()
+        if not active_files:
+            return
+
+        use_symbolname_as_ref = self.chk_use_symbol_name.GetValue()
+        ok = process_archives(
+            active_files,
+            is_purge=is_purge,
+            rename_assets=False,
+            use_symbol_name=use_symbolname_as_ref,
+        )
+        if ok:
+            self.append_log("[OK] Action complete. Refreshing lists...")
+            self.refresh_zip_list()
+            self.refresh_symbol_list()
+        else:
+            self.append_log("[FAIL] Action failed. See log for details.")
 
 class BOMFileDropTarget(wx.FileDropTarget):
     """Enable drag-and-drop of BOM CSV files onto the Mouser tab."""
@@ -1138,62 +1046,6 @@ class MouserAutoOrderTab(wx.Panel):
         finally:
             _sys.stdout, _sys.stderr = old_stdout, old_stderr
 
-
-# --- Patch backend ZIP selection handling for DataViewListCtrl ---
-import gui_core
-
-
-def _wx_get_active_files_for_processing(dpg):
-    """Return checked ZIP paths from DataViewListCtrl that are valid for import."""
-    try:
-        from gui_core import GUI_FILE_DATA
-    except Exception:
-        return []
-
-    gui = getattr(dpg, "gui", None)
-    if not gui or not hasattr(gui, "zip_file_list"):
-        return []
-
-    model = gui.zip_file_list.GetStore()
-    selected_paths = []
-    for i in range(model.GetCount()):
-        checked = model.GetValueByRow(i, 0)
-        if not checked or i >= len(GUI_FILE_DATA):
-            continue
-
-        entry = GUI_FILE_DATA[i]
-        path = entry.get("path")
-        status = entry.get("status", "")
-        if status in ("MISSING_SYMBOL", "MISSING_FOOTPRINT"):
-            gui.append_log(f"[WARN] Skipping {Path(path).name}: missing required files.")
-            continue
-
-        if path:
-            selected_paths.append(path)
-
-    if not selected_paths:
-        gui.append_log("[WARN] No valid ZIPs selected for import (must contain both symbol + footprint).")
-
-    return selected_paths
-
-
-gui_core.get_active_files_for_processing = _wx_get_active_files_for_processing
-
-def _wx_collect_selected_symbols_for_export(dpg):
-    """Return checked symbol names using wx.CheckListBox selections."""
-    try:
-        from gui_core import list_project_symbols
-        symbols = list_project_symbols()
-    except Exception:
-        symbols = []
-    gui = getattr(dpg, "gui", None)
-    if not gui or not hasattr(gui, "symbol_list"):
-        return []
-    lst = gui.symbol_list
-    checked = [i for i in range(lst.GetCount()) if lst.IsChecked(i)]
-    return [symbols[i] for i in checked if i < len(symbols)]
-
-gui_core.collect_selected_symbols_for_export = _wx_collect_selected_symbols_for_export
 
 # ===============================
 # wx.App entry
