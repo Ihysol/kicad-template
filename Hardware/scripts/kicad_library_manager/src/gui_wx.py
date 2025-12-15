@@ -69,6 +69,15 @@ for h in list(logger.handlers):
 logger.propagate = False
 
 
+# --- Shared icon helper for buttons ---
+ICON_SIZE = (16, 16)
+def set_button_icon(btn: wx.Button, art_id, position=wx.RIGHT):
+    """Attach a standard wx art bitmap to a button when available."""
+    bmp = wx.ArtProvider.GetBitmap(art_id, wx.ART_BUTTON, ICON_SIZE)
+    if bmp.IsOk():
+        btn.SetBitmap(bmp, position)
+
+
 # --- GUI Log handler (later attached to wx.TextCtrl in MainFrame) ---
 class WxGuiLogHandler(logging.Handler):
     """Custom logging handler that forwards logs into wx TextCtrl."""
@@ -322,6 +331,8 @@ class MainFrame(wx.Frame):
         h_buttons = wx.BoxSizer(wx.HORIZONTAL)
         self.btn_select = wx.Button(panel, label="Select ZIP Folder")
         self.btn_open = wx.Button(panel, label="Open ZIP Folder")
+        set_button_icon(self.btn_select, wx.ART_NEW_DIR)
+        set_button_icon(self.btn_open, wx.ART_FOLDER_OPEN)
         h_buttons.Add(self.btn_select, 0, wx.RIGHT, 8)
         h_buttons.Add(self.btn_open, 0)
         self.current_folder_txt = wx.StaticText(panel, label="Current Folder: (Initializing...)")
@@ -347,6 +358,7 @@ class MainFrame(wx.Frame):
         # === Top controls ===
         h_zip_top = wx.BoxSizer(wx.HORIZONTAL)
         self.btn_refresh_zips = wx.Button(self.tab_zip, label="Refresh ZIPs")
+        set_button_icon(self.btn_refresh_zips, wx.ART_REDO)
         self.chk_master_zip = wx.CheckBox(self.tab_zip, label="Select All")
         h_zip_top.Add(self.btn_refresh_zips, 0, wx.RIGHT, 8)
         h_zip_top.Add(self.chk_master_zip, 0, wx.ALIGN_CENTER_VERTICAL)
@@ -380,6 +392,8 @@ class MainFrame(wx.Frame):
         # === Process / Purge buttons ===
         self.btn_process = wx.Button(self.tab_zip, label="PROCESS / IMPORT")
         self.btn_purge = wx.Button(self.tab_zip, label="PURGE / DELETE")
+        set_button_icon(self.btn_process, wx.ART_GO_FORWARD)
+        set_button_icon(self.btn_purge, wx.ART_DELETE)
         h_zip_btns = wx.BoxSizer(wx.HORIZONTAL)
         h_zip_btns.Add(self.btn_process, 0, wx.RIGHT, 8)
         h_zip_btns.Add(self.btn_purge, 0)
@@ -392,6 +406,7 @@ class MainFrame(wx.Frame):
         
         h_sym_top = wx.BoxSizer(wx.HORIZONTAL)
         self.btn_refresh_symbols = wx.Button(self.tab_symbol, label="Refresh Symbols")
+        set_button_icon(self.btn_refresh_symbols, wx.ART_REDO)
         self.chk_master_symbols = wx.CheckBox(self.tab_symbol, label="Select All")
         
         # --- fix ghost button / layout artifact ---
@@ -411,11 +426,15 @@ class MainFrame(wx.Frame):
         self.btn_export = wx.Button(self.tab_symbol, label="EXPORT SELECTED")
         self.btn_open_output = wx.Button(self.tab_symbol, label="OPEN OUTPUT FOLDER")
         self.btn_delete_orphans = wx.Button(self.tab_symbol, label="DELETE SELECTED")
+        set_button_icon(self.btn_export, wx.ART_FILE_SAVE_AS)
+        set_button_icon(self.btn_open_output, wx.ART_FOLDER_OPEN)
+        set_button_icon(self.btn_delete_orphans, wx.ART_DELETE)
         self.tab_symbol.Layout()
         self.btn_delete_orphans.SetForegroundColour(wx.RED)
 
         h_sym_btns = wx.BoxSizer(wx.HORIZONTAL)
         self.btn_delete_selected = wx.Button(self.tab_symbol, label="DELETE SELECTED")
+        set_button_icon(self.btn_delete_selected, wx.ART_DELETE)
         self.btn_delete_selected.SetForegroundColour(wx.RED)
 
         h_sym_btns.Add(self.btn_export, 0, wx.RIGHT, 8)
@@ -428,6 +447,7 @@ class MainFrame(wx.Frame):
         # --- DRC tab content ---
         self.drc_vbox = wx.BoxSizer(wx.VERTICAL)
         self.btn_drc = wx.Button(self.tab_drc, label="Update DRC Rules")
+        set_button_icon(self.btn_drc, wx.ART_TICK_MARK)
         self.drc_vbox.Add(wx.StaticText(self.tab_drc, label="Auto-Apply DRC Rules Based on PCB Layer Count:"), 0, wx.BOTTOM, 5)
         self.drc_vbox.Add(self.btn_drc, 0, wx.BOTTOM, 5)
         self.tab_drc.SetSizer(self.drc_vbox)
@@ -865,9 +885,9 @@ class MouserAutoOrderTab(wx.Panel):
         )
         
         # Set button icons
-        self.btn_open_bom.SetBitmap(wx.ArtProvider.GetBitmap(wx.ART_FOLDER_OPEN, wx.ART_BUTTON, (16,16)), wx.RIGHT)
-        self.btn_reload.SetBitmap(wx.ArtProvider.GetBitmap(wx.ART_UNDO, wx.ART_BUTTON, (16,16)), wx.RIGHT)
-        self.btn_submit.SetBitmap(wx.ArtProvider.GetBitmap(wx.ART_GO_DIR_UP, wx.ART_BUTTON, (16,16)), wx.RIGHT)
+        set_button_icon(self.btn_open_bom, wx.ART_FOLDER_OPEN)
+        set_button_icon(self.btn_reload, wx.ART_UNDO)
+        set_button_icon(self.btn_submit, wx.ART_GO_DIR_UP)
 
         top.Add(self.btn_open_bom, 1, wx.EXPAND | wx.RIGHT, 6)
         top.Add(self.btn_reload, 1, wx.EXPAND | wx.RIGHT, 6)
