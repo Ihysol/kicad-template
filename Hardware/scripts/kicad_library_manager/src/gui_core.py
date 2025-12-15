@@ -365,6 +365,8 @@ def execute_library_action(paths: List[Path], is_purge: bool, rename_assets: boo
                 sys.argv = ["cli_main", "purge" if is_purge else "process"]
                 if rename_assets and not is_purge:
                     sys.argv.append("--rename-assets")
+                if use_symbol_name and not is_purge:
+                    sys.argv.append("--use-symbol-name")
                 sys.argv.extend([str(p) for p in paths])
 
                 try:

@@ -809,12 +809,29 @@ class MainFrame(wx.Frame):
         elif "DRC" in tab_label:
             self.append_log("[INFO] DRC Manager ready.")
             
-        elif "MOUSER" in tab_label:
+        elif "mouser" in tab_label.lower():
             self.append_log("[INFO] Mouser Auto Order ready.")
 
         # Keep original backend behavior
         on_tab_change(self.shim)
         event.Skip()
+
+class BOMFileDropTarget(wx.FileDropTarget):
+    """Enable drag-and-drop of BOM CSV files onto the Mouser tab."""
+    def __init__(self, panel):
+        super().__init__()
+        self.panel = panel
+
+    def OnDropFiles(self, x, y, filenames):
+        for f in filenames:
+            p = Path(f)
+            if p.is_file() and p.suffix.lower() == ".csv":
+                self.panel.current_bom_file = str(p)
+                wx.CallAfter(self.panel.load_bom, str(p))
+                wx.CallAfter(self.panel.log, f"[OK] Loaded BOM via drag-and-drop: {p.name}")
+                return True
+        wx.CallAfter(self.panel.log, "[WARN] Only CSV files are accepted for BOM import.")
+        return False
 
 class MouserAutoOrderTab(wx.Panel):
     """Tab to load BOM CSV, filter items and submit order via Mouser API (in-tab GUI)."""
@@ -876,17 +893,25 @@ class MouserAutoOrderTab(wx.Panel):
         s.Add(cfg, 0, wx.ALL | wx.EXPAND, 0)
         s.AddSpacer(10)
         
-        # ---------- Label for excluded components ----------
-        self.label_dv_header = wx.StaticText(self, label="Unwanted components (mark to exclude):")
-        self.label_dv_header.SetToolTip("Select which components to exclude from the order by checking their boxes.")
-        s.Add(self.label_dv_header, 0, wx.LEFT | wx.RIGHT | wx.TOP, 0)
+        # ---------- Label + master toggle ----------
+        header = wx.BoxSizer(wx.HORIZONTAL)
+        self.label_dv_header = wx.StaticText(self, label="Components to order (check to include):")
+        self.label_dv_header.SetToolTip("Checked items will be included in the order; uncheck to exclude specific lines.")
+        header.Add(self.label_dv_header, 0, wx.ALIGN_CENTER_VERTICAL)
+        header.AddStretchSpacer()
+        self.chk_master_mouser = wx.CheckBox(self, label="Select All")
+        self.chk_master_mouser.SetToolTip("Toggle all BOM lines on or off.")
+        header.Add(self.chk_master_mouser, 0, wx.ALIGN_CENTER_VERTICAL)
+        s.Add(header, 0, wx.LEFT | wx.RIGHT | wx.TOP, 0)
 
         # ---------- DataView for BOM rows ----------
         self.dv = dv.DataViewListCtrl(self, style=dv.DV_ROW_LINES | dv.DV_VERT_RULES)
-        self.col_exclude = self.dv.AppendToggleColumn("", width=40) # Checkbox to exclude items
+        self.col_exclude = self.dv.AppendToggleColumn("Include", width=80) # Checkbox to include items
         self.col_ref     = self.dv.AppendTextColumn("Reference", width=250)
         self.col_mnr     = self.dv.AppendTextColumn("Mouser Number", width=200)
         self.col_qty     = self.dv.AppendTextColumn("Qty", width=80)
+        self.dv.SetDropTarget(BOMFileDropTarget(self))
+        self.SetDropTarget(BOMFileDropTarget(self))
         s.Add(self.dv, 1, wx.EXPAND | wx.ALL, 0)
 
         self.SetSizer(s)
@@ -896,6 +921,8 @@ class MouserAutoOrderTab(wx.Panel):
         self.btn_reload.Bind(wx.EVT_BUTTON, self.on_reload_bom)
         self.btn_submit.Bind(wx.EVT_BUTTON, self.on_submit_order)
         self.choice_mnr.Bind(wx.EVT_COMBOBOX, self.on_mnr_changed)
+        self.Bind(wx.EVT_CHECKBOX, self.on_master_mouser_toggle, self.chk_master_mouser)
+        self.dv.Bind(dv.EVT_DATAVIEW_ITEM_VALUE_CHANGED, self.on_mouser_checkbox_changed)
 
     # ---------- Logging helper ----------
     def log(self, text):
@@ -958,9 +985,10 @@ class MouserAutoOrderTab(wx.Panel):
             mnrs = data.get(mnr_col, [""] * len(refs))
             qtys = data.get("Qty", [""] * len(refs))
             for ref, mnr, qty in zip(refs, mnrs, qtys):
-                self.dv.GetStore().AppendItem([False, str(ref), str(mnr), str(qty)])
+                self.dv.GetStore().AppendItem([True, str(ref), str(mnr), str(qty)])
                 
             self.log(f"[OK] Loaded {len(refs)} BOM rows.")
+            self._update_master_mouser_state()
         except Exception as e:
             self.log(f"[ERROR] Failed to load BOM: {e}")
             
@@ -980,20 +1008,47 @@ class MouserAutoOrderTab(wx.Panel):
         qtys = self.current_data_array.get("Qty", [""] * len(refs))
 
         for ref, mnr, qty in zip(refs, mnrs, qtys):
-            store.AppendItem([False, str(ref), str(mnr), str(qty)])
+            store.AppendItem([True, str(ref), str(mnr), str(qty)])
+        self._update_master_mouser_state()
+
+    def _update_master_mouser_state(self):
+        """Sync master checkbox label/value based on current rows."""
+        store = self.dv.GetStore()
+        total = store.GetCount()
+        checked = sum(1 for row in range(total) if store.GetValueByRow(row, 0))
+        all_checked = total > 0 and checked == total
+        self.chk_master_mouser.SetValue(all_checked)
+        self.chk_master_mouser.SetLabel("Deselect All" if all_checked else "Select All")
+
+    def on_master_mouser_toggle(self, event):
+        """Select or deselect all BOM rows."""
+        checked = self.chk_master_mouser.IsChecked()
+        store = self.dv.GetStore()
+        for row in range(store.GetCount()):
+            store.SetValueByRow(checked, row, 0)
+        self.dv.Refresh()
+        self.chk_master_mouser.SetLabel("Deselect All" if checked else "Select All")
+        if event:
+            event.Skip()
+
+    def on_mouser_checkbox_changed(self, event):
+        """Handle per-row checkbox toggles to keep master state in sync."""
+        self._update_master_mouser_state()
+        if event:
+            event.Skip()
 
     # ---------- Data preparation ----------
     def collect_selected_for_order(self):
         """
-        Collect data from DataView excluding items marked as excluded.
+        Collect checked DataView rows for ordering.
         Returns a dict compatible with MouserOrderClient.
         """
         store = self.dv.GetStore()
         refs, mnrs, qtys = [], [], []
         col_mnr_name = self.choice_mnr.GetValue() or mouser.CSV_MOUSER_COLUMN_NAME
         for row in range(store.GetCount()):
-            excluded = store.GetValueByRow(row, 0)
-            if excluded:
+            include_flag = store.GetValueByRow(row, 0)
+            if not include_flag:
                 continue
             refs.append(store.GetValueByRow(row, 1))
             mnrs.append(store.GetValueByRow(row, 2))
