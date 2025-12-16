@@ -12,7 +12,6 @@ import time
 import glob
 import json
 import csv
-import pandas as pd
 
 BASE_URL = "https://api.mouser.com/api/v1.0"
 
@@ -204,29 +203,34 @@ class BOMHandler:
         """
         print(f"{ICON_INFO}  Processing BOM file: {bom_file}\n")
         
-        # Read CSV
         try:
-            df = pd.read_csv(bom_file, delimiter=CSV_DELIMITER)
-            df = df.fillna("/")
+            with open(bom_file, newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f, delimiter=CSV_DELIMITER)
+                headers = reader.fieldnames or []
+                if not headers:
+                    print(f"{ICON_FAIL}  No headers found in CSV.\n")
+                    return {}
+
+                # Check required columns
+                required = [CSV_REFERENCE_COLUMN_NAME, CSV_QUANTITY_COLUMN_NAME]
+                missing_required = [h for h in required if h not in headers]
+                if missing_required:
+                    print(f"{ICON_WARN} Missing required columns: {', '.join(missing_required)}\n")
+                    return {}
+
+                self.target_headers = headers
+                # Initialize data arrays
+                self.data_array = {h: [] for h in headers}
+
+                for row in reader:
+                    for h in headers:
+                        val = row.get(h, "")
+                        if val is None or str(val).strip() == "":
+                            val = "/"
+                        self.data_array[h].append(str(val).strip())
         except Exception as e:
             print(f"{ICON_FAIL}  Could not read CSV: {e}")
             return {}
-        
-        # Check required columns
-        required = [CSV_REFERENCE_COLUMN_NAME, CSV_QUANTITY_COLUMN_NAME]
-        missing_required = [h for h in required if h not in df.columns]
-        if missing_required:
-            print(f"{ICON_WARN} Missing required columns: {', '.join(missing_required)}\n")
-            return {}
-
-        # Set target headers
-        self.target_headers = list(df.columns)
-
-        # Create data array
-        self.data_array = {
-            header: df[header].astype(str).str.strip().tolist()
-            for header in self.target_headers
-        }
 
         # Summarize Reference column
         new_refs = []
@@ -264,22 +268,30 @@ class MouserOrderClient:
         print("\n------- Preparing order item -------\n")
         print(f"{ICON_INFO}  Preparing order items")
         multiplier = data_array.pop("Multiplier", 1)
+        try:
+            multiplier = int(multiplier)
+        except Exception:
+            multiplier = 1
         mnr_col_name = data_array.pop("MNR_Column_Name", CSV_MOUSER_COLUMN_NAME)
-        df = pd.DataFrame(data_array)
         items = []
         print(f"{ICON_INFO}  Using order multiplier: {multiplier}\n")
 
-        for _, row in df.iterrows():
+        refs = data_array.get(CSV_REFERENCE_COLUMN_NAME, [])
+        qtys = data_array.get(CSV_QUANTITY_COLUMN_NAME, [])
+        mnrs = data_array.get(mnr_col_name, [])
+        row_count = min(len(refs), len(qtys), len(mnrs))
+
+        for idx in range(row_count):
             try:
-                base_qty = int(row["Qty"])
-            except Exception:
-                print(f"{ICON_WARN} Skipping item {row.get('Reference','?')} due to invalid quantity: {row.get('Qty')}")
+                base_qty = int(qtys[idx])
+            except Exception as e:
+                print(f"{ICON_WARN} Skipping item {refs[idx] if idx < len(refs) else '?'} due to invalid quantity: {qtys[idx] if idx < len(qtys) else '?'} ({e})")
                 continue
             items.append(
                 {
-                    "MouserPartNumber": row.get(mnr_col_name, ""),
+                    "MouserPartNumber": mnrs[idx] if idx < len(mnrs) else "",
                     "Quantity": base_qty * multiplier,
-                    "CustomerPartNumber": row.get("Reference", ""),
+                    "CustomerPartNumber": refs[idx] if idx < len(refs) else "",
                 }
             )
         print(f"{ICON_INFO}  Prepared {len(items)} items for ordering.\n")

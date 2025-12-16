@@ -3,7 +3,6 @@ import threading
 import time
 from pathlib import Path
 
-import mouser_integration as mouser
 import wx
 import wx.dataview as dv
 
@@ -138,15 +137,32 @@ class MainFrame(wx.Frame):
         self.zip_rows = []
         self.InitUI()
         self._configure_logger()
-
-        cfg = load_config()
-        self.chk_use_symbol_name.SetValue(cfg.get(USE_SYMBOLNAME_KEY, False))
-
-        self.refresh_zip_list()
-        self.refresh_symbol_list()
-
         self.Centre()
         self.Show()
+
+        # Kick off background load so the frame appears immediately
+        threading.Thread(target=self._post_init_load, daemon=True).start()
+
+    def _post_init_load(self):
+        """Load config and initial data without blocking the UI thread."""
+        cfg = load_config()
+        try:
+            zip_rows = scan_zip_folder(self.current_folder)
+        except Exception as e:
+            logger.error(f"Failed to scan ZIP folder: {e}")
+            zip_rows = []
+        try:
+            symbols = list_project_symbols()
+        except Exception as e:
+            logger.error(f"Failed to load project symbols: {e}")
+            symbols = []
+
+        wx.CallAfter(self._apply_initial_data, cfg, zip_rows, symbols)
+
+    def _apply_initial_data(self, cfg, zip_rows, symbols):
+        self.chk_use_symbol_name.SetValue(cfg.get(USE_SYMBOLNAME_KEY, False))
+        self.refresh_zip_list(rows=zip_rows)
+        self.refresh_symbol_list(symbols=symbols)
 
     def _configure_logger(self):
         """Attach GUI log handler once."""
@@ -662,11 +678,13 @@ class MainFrame(wx.Frame):
         dc.SelectObject(wx.NullBitmap)
         return bmp
 
-    def refresh_zip_list(self):
+    def refresh_zip_list(self, rows=None):
         """Scan current folder and rebuild ZIP DataView list."""
         self.current_folder.mkdir(parents=True, exist_ok=True)
         self.current_folder_txt.SetLabel(f"Current Folder: {self.current_folder}")
-        self.zip_rows = scan_zip_folder(self.current_folder)
+        if rows is None:
+            rows = scan_zip_folder(self.current_folder)
+        self.zip_rows = rows
 
         model = self.zip_file_list.GetStore()
         model.DeleteAllItems()
@@ -693,8 +711,9 @@ class MainFrame(wx.Frame):
         self.chk_master_zip.SetLabel("Select All")
         self.zip_file_list.Refresh()
 
-    def refresh_symbol_list(self):
-        symbols = list_project_symbols()
+    def refresh_symbol_list(self, symbols=None):
+        if symbols is None:
+            symbols = list_project_symbols()
         self.symbol_list.Clear()
         for sym in symbols:
             self.symbol_list.Append(sym)
@@ -770,9 +789,11 @@ class MouserAutoOrderTab(wx.Panel):
         setting multiplier, and submitting orders. Also sets up the data view.
         """
         super().__init__(parent)
+        import mouser_integration as mouser  # heavy import: defer until tab creation
+        self.mouser = mouser
         self.log_callback = log_callback
-        self.bom_handler = mouser.BOMHandler() # BOM parsing utility
-        self.order_client = mouser.MouserOrderClient() # Mouser order API client
+        self.bom_handler = self.mouser.BOMHandler() # BOM parsing utility
+        self.order_client = self.mouser.MouserOrderClient() # Mouser order API client
         self.current_bom_file = None
         self.current_data_array = None
 
@@ -897,7 +918,7 @@ class MouserAutoOrderTab(wx.Panel):
             # Build MNR choices: any header except Reference/Qty
             choices = [h for h in headers if h not in ("Reference", "Qty")]
             if not choices:
-                choices = [mouser.CSV_MOUSER_COLUMN_NAME] # fallback: default MNR column name
+                choices = [self.mouser.CSV_MOUSER_COLUMN_NAME] # fallback: default MNR column name
             self.choice_mnr.Clear()
             self.choice_mnr.AppendItems(choices)
             self.choice_mnr.SetSelection(0)
@@ -973,7 +994,7 @@ class MouserAutoOrderTab(wx.Panel):
         """
         store = self.dv.GetStore()
         refs, mnrs, qtys = [], [], []
-        col_mnr_name = self.choice_mnr.GetValue() or mouser.CSV_MOUSER_COLUMN_NAME
+        col_mnr_name = self.choice_mnr.GetValue() or self.mouser.CSV_MOUSER_COLUMN_NAME
         for row in range(store.GetCount()):
             include_flag = store.GetValueByRow(row, 0)
             if not include_flag:
@@ -1029,8 +1050,8 @@ class MouserAutoOrderTab(wx.Panel):
             # Retry mechanism for API submission
             attempts = 0
             success = False
-            for attempts in range(mouser.API_TIMEOUT_MAX_RETRIES):
-                self.log(f"Attempt {attempts+1}/{mouser.API_TIMEOUT_MAX_RETRIES}")
+            for attempts in range(self.mouser.API_TIMEOUT_MAX_RETRIES):
+                self.log(f"Attempt {attempts+1}/{self.mouser.API_TIMEOUT_MAX_RETRIES}")
                 try:
                     ok = self.order_client.order_parts_from_data_array(dict(data_for_order))
                 except Exception as e:
@@ -1039,9 +1060,9 @@ class MouserAutoOrderTab(wx.Panel):
                 if ok:
                     success = True
                     break
-                if attempts < mouser.API_TIMEOUT_MAX_RETRIES - 1:
-                    self.log(f"Attempt failed. Retrying in {mouser.API_TIMEOUT_SLEEP_S} s...")
-                    time.sleep(mouser.API_TIMEOUT_SLEEP_S)
+                if attempts < self.mouser.API_TIMEOUT_MAX_RETRIES - 1:
+                    self.log(f"Attempt failed. Retrying in {self.mouser.API_TIMEOUT_SLEEP_S} s...")
+                    time.sleep(self.mouser.API_TIMEOUT_SLEEP_S)
             self.log(f"[INFO] Final result: Attempts → {attempts+1}, Success → {success}")
         finally:
             _sys.stdout, _sys.stderr = old_stdout, old_stderr
