@@ -30,6 +30,17 @@ KICAD9_FOOTPRINT_SCHEMA = 20241229  # KiCad 9 .kicad_mod "version"
 
 SUB_PART_PATTERN = re.compile(r"_\d(_\d)+$|_\d$")  # strip _1_1 / _2 etc.
 
+# Only persist these properties when importing symbols
+ALLOWED_SYMBOL_PROPERTIES = {
+    "Value",
+    "Reference",
+    "Footprint",
+    "Datasheet",
+    "Description",
+    "LCSC",
+    "MNR",
+}
+
 # will be defined after environment bootstrap
 PROJECT_DIR: Path
 PROJECT_SYMBOL_LIB: Path
@@ -437,6 +448,72 @@ def normalize_expr_for_project(expr, project_version: int):
                     sub, rightmost_x, prop_index, for_kicad8
                 )
         return node
+
+    def prune_properties(node):
+        """Remove any (property ...) blocks not in the allowed whitelist."""
+        if not isinstance(node, list):
+            return node
+        cleaned = []
+        for child in node:
+            if (
+                isinstance(child, list)
+                and child
+                and child[0] == Symbol("property")
+            ):
+                name = str(child[1]).strip('"') if len(child) > 1 else ""
+                if name not in ALLOWED_SYMBOL_PROPERTIES:
+                    continue
+            cleaned.append(prune_properties(child))
+        return cleaned
+
+    def ensure_property(sym_node, prop_name: str, default="~"):
+        """Add missing property with a hidden default value for part metadata."""
+        if not (
+            isinstance(sym_node, list)
+            and sym_node
+            and sym_node[0] == Symbol("symbol")
+        ):
+            return
+
+        existing = find_sexp_property(sym_node, prop_name)
+        if existing:
+            if len(existing) > 2 and str(existing[2]).strip() == "":
+                existing[2] = default
+            return
+
+        new_prop = [
+            Symbol("property"),
+            prop_name,
+            default,
+            [Symbol("at"), 0, 0, 0],
+            [
+                Symbol("effects"),
+                [Symbol("font"), [Symbol("size"), 1.27, 1.27]],
+                [Symbol("justify"), Symbol("left")],
+            ],
+            [Symbol("hide"), Symbol("yes")],
+        ]
+
+        insert_pos = 2
+        for idx, child in enumerate(sym_node):
+            if isinstance(child, list) and child and child[0] == Symbol("property"):
+                insert_pos = idx + 1
+        sym_node.insert(insert_pos, new_prop)
+
+    def add_default_part_properties(expr_root):
+        """Ensure each main symbol has LCSC/MNR properties with default '~'."""
+        if not isinstance(expr_root, list):
+            return
+        for el in expr_root:
+            if isinstance(el, list) and el and el[0] == Symbol("symbol"):
+                name = str(el[1]) if len(el) > 1 else ""
+                if SUB_PART_PATTERN.search(name):
+                    continue
+                ensure_property(el, "MNR")
+                ensure_property(el, "LCSC")
+
+    expr = prune_properties(expr)
+    add_default_part_properties(expr)
 
     # Main branch: KiCad 8 vs 9
     if project_version < KICAD9_SCHEMA:
