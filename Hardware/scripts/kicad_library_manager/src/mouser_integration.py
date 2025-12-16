@@ -278,6 +278,7 @@ class MouserOrderClient:
 
         refs = data_array.get(CSV_REFERENCE_COLUMN_NAME, [])
         qtys = data_array.get(CSV_QUANTITY_COLUMN_NAME, [])
+        extras = data_array.pop("ExtraQty", [])
         mnrs = data_array.get(mnr_col_name, [])
         row_count = min(len(refs), len(qtys), len(mnrs))
 
@@ -287,10 +288,16 @@ class MouserOrderClient:
             except Exception as e:
                 print(f"{ICON_WARN} Skipping item {refs[idx] if idx < len(refs) else '?'} due to invalid quantity: {qtys[idx] if idx < len(qtys) else '?'} ({e})")
                 continue
+            extra_qty = 0
+            if idx < len(extras):
+                try:
+                    extra_qty = int(extras[idx])
+                except Exception:
+                    extra_qty = 0
             items.append(
                 {
                     "MouserPartNumber": mnrs[idx] if idx < len(mnrs) else "",
-                    "Quantity": base_qty * multiplier,
+                    "Quantity": base_qty * multiplier + extra_qty,
                     "CustomerPartNumber": refs[idx] if idx < len(refs) else "",
                 }
             )

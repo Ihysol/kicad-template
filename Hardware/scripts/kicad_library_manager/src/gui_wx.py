@@ -1,4 +1,9 @@
+import csv
+import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -9,6 +14,7 @@ import wx.dataview as dv
 from gui_core import (
     APP_VERSION,
     USE_SYMBOLNAME_KEY,
+    SHOW_LOG_KEY,
     export_symbols_with_checks,
     list_project_symbols,
     load_config,
@@ -19,7 +25,7 @@ from gui_core import (
     scan_zip_folder,
     update_drc_rules,
 )
-from library_manager import INPUT_ZIP_FOLDER
+from library_manager import INPUT_ZIP_FOLDER, PROJECT_DIR
 
 # ===============================
 # Logging
@@ -180,20 +186,23 @@ class MainFrame(wx.Frame):
         self.panel = panel
         vbox = wx.BoxSizer(wx.VERTICAL)
 
-        # --- Folder selection ---
-        box1 = wx.StaticBox(panel, label="Select Archive Folder")
-        s1 = wx.StaticBoxSizer(box1, wx.VERTICAL)
-        h_buttons = wx.BoxSizer(wx.HORIZONTAL)
-        self.btn_select = wx.Button(panel, label="Select ZIP Folder")
-        self.btn_open = wx.Button(panel, label="Open ZIP Folder")
-        set_button_icon(self.btn_select, wx.ART_NEW_DIR)
-        set_button_icon(self.btn_open, wx.ART_FOLDER_OPEN)
-        h_buttons.Add(self.btn_select, 0, wx.RIGHT, 8)
-        h_buttons.Add(self.btn_open, 0)
-        self.current_folder_txt = wx.StaticText(panel, label="Current Folder: (Initializing...)")
-        s1.Add(h_buttons, 0, wx.BOTTOM, 5)
-        s1.Add(self.current_folder_txt, 0, wx.TOP, 2)
-        vbox.Add(s1, 0, wx.EXPAND | wx.ALL, 8)
+        # --- Project opener ---
+        self.project_file = self._find_project_file()
+        proj_label = (
+            f"Project: {self.project_file}"
+            if self.project_file
+            else "Project: not found"
+        )
+        proj_box = wx.BoxSizer(wx.HORIZONTAL)
+        self.btn_open_project = wx.Button(panel, label="Open KiCad Project in New Window")
+        self.btn_open_project.Enable(bool(self.project_file))
+        set_button_icon(self.btn_open_project, wx.ART_NORMAL_FILE)
+        self.lbl_project = wx.StaticText(panel, label=proj_label)
+        proj_box.Add(self.btn_open_project, 0, wx.RIGHT, 8)
+        proj_box.Add(self.lbl_project, 0, wx.ALIGN_CENTER_VERTICAL)
+        vbox.Add(proj_box, 0, wx.EXPAND | wx.ALL, 8)
+        self.log_popup = None
+        self.log_popup_ctrl = None
 
         # --- Tabs ---
         self.notebook = wx.Notebook(panel)
@@ -209,6 +218,23 @@ class MainFrame(wx.Frame):
 
         # --- ZIP tab content ---
         self.zip_vbox = wx.BoxSizer(wx.VERTICAL)
+
+        # === Folder selection (ZIP tab only) ===
+        box1 = wx.StaticBox(self.tab_zip, label="Select Archive Folder")
+        s1 = wx.StaticBoxSizer(box1, wx.VERTICAL)
+        h_buttons = wx.BoxSizer(wx.HORIZONTAL)
+        self.btn_select = wx.Button(self.tab_zip, label="Select ZIP Folder")
+        self.btn_open = wx.Button(self.tab_zip, label="Open ZIP Folder")
+        set_button_icon(self.btn_select, wx.ART_NEW_DIR)
+        set_button_icon(self.btn_open, wx.ART_FOLDER_OPEN)
+        h_buttons.Add(self.btn_select, 0, wx.RIGHT, 8)
+        h_buttons.Add(self.btn_open, 0)
+        self.current_folder_txt = wx.StaticText(
+            self.tab_zip, label="Current Folder: (Initializing...)"
+        )
+        s1.Add(h_buttons, 0, wx.BOTTOM, 5)
+        s1.Add(self.current_folder_txt, 0, wx.TOP, 2)
+        self.zip_vbox.Add(s1, 0, wx.EXPAND | wx.ALL, 8)
 
         # === Top controls ===
         h_zip_top = wx.BoxSizer(wx.HORIZONTAL)
@@ -308,8 +334,20 @@ class MainFrame(wx.Frame):
         self.tab_drc.SetSizer(self.drc_vbox)
 
         # --- Log output ---
-        self.log_ctrl = wx.TextCtrl(panel, style=wx.TE_MULTILINE | wx.TE_READONLY)
-        vbox.Add(self.log_ctrl, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        self.log_panel = wx.Panel(panel)
+        log_box = wx.BoxSizer(wx.VERTICAL)
+        log_header = wx.BoxSizer(wx.HORIZONTAL)
+        log_header.Add(wx.StaticText(self.log_panel, label="Log:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        self.btn_toggle_log = wx.Button(self.log_panel, label="Open Log Window")
+        set_button_icon(self.btn_toggle_log, wx.ART_LIST_VIEW)
+        log_header.Add(self.btn_toggle_log, 0)
+        log_box.Add(log_header, 0, wx.BOTTOM, 4)
+
+        self.log_ctrl = wx.TextCtrl(self.log_panel, style=wx.TE_MULTILINE | wx.TE_READONLY)
+        self.log_ctrl.SetMinSize((-1, 120))  # keep compact on main window
+        log_box.Add(self.log_ctrl, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        self.log_panel.SetSizer(log_box)
+        vbox.Add(self.log_panel, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
 
         # --- Footer ---
@@ -324,18 +362,27 @@ class MainFrame(wx.Frame):
         self.btn_issues.SetBackgroundColour(panel.GetBackgroundColour())
         self.btn_issues.SetCursor(wx.Cursor(wx.CURSOR_HAND))
         footer_box.Add(self.btn_issues, 0, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 10)
+        self.chk_show_log = wx.CheckBox(panel, label="Show log")
         self.lbl_version = wx.StaticText(panel, label=f"Version: {APP_VERSION}")
         footer_box.AddStretchSpacer(1)
+        footer_box.Add(self.chk_show_log, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
         footer_box.Add(self.lbl_version, 0, wx.ALIGN_CENTER_VERTICAL)
         vbox.Add(footer_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         panel.SetSizer(vbox)
+        # Apply persisted log visibility
+        cfg = load_config()
+        show_log = cfg.get(SHOW_LOG_KEY, True)
+        self.chk_show_log.SetValue(show_log)
+        self._apply_log_visibility(show_log, save_pref=False)
 
         # --- Bind events ---
         self.Bind(wx.EVT_BUTTON, lambda e: self.open_url("https://github.com/Ihysol"), self.btn_author)
         self.Bind(wx.EVT_BUTTON, lambda e: self.open_url("https://github.com/Ihysol/kicad-template"), self.btn_issues)
+        self.Bind(wx.EVT_BUTTON, self.on_open_project, self.btn_open_project)
         self.Bind(wx.EVT_BUTTON, self.on_refresh_symbols, self.btn_refresh_symbols)
         self.Bind(wx.EVT_CHECKLISTBOX, self.on_symbol_item_toggled, self.symbol_list)
         self.Bind(wx.EVT_CHECKBOX, self.on_use_symbol_name_toggled, self.chk_use_symbol_name)
+        self.Bind(wx.EVT_CHECKBOX, self.on_toggle_show_log, self.chk_show_log)
         self.Bind(wx.EVT_BUTTON, self.on_delete_selected, self.btn_delete_selected)
 
 
@@ -351,6 +398,7 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_CHECKBOX, self.on_master_zip_toggle, self.chk_master_zip)
         self.zip_file_list.Bind(dv.EVT_DATAVIEW_ITEM_VALUE_CHANGED, self.on_zip_checkbox_changed)
         self.notebook.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self.on_tab_changed)
+        self.Bind(wx.EVT_BUTTON, self.on_toggle_log, self.btn_toggle_log)
 
     # ---------- Event handlers ----------
     def on_resize_zip_columns(self, event):
@@ -604,6 +652,8 @@ class MainFrame(wx.Frame):
             self.log_ctrl.SetDefaultStyle(wx.TextAttr(wx.WHITE))
         self.log_ctrl.AppendText(text + "\n")
         self.log_ctrl.SetDefaultStyle(wx.TextAttr(wx.WHITE))
+        if self.log_popup_ctrl:
+            self.log_popup_ctrl.AppendText(text + "\n")
 
     def clear_log(self):
         self.log_ctrl.Clear()
@@ -667,6 +717,78 @@ class MainFrame(wx.Frame):
         elif "mouser" in tab_label.lower():
             self.append_log("[INFO] Mouser Auto Order ready.")
         event.Skip()
+
+    def _find_project_file(self) -> Path | None:
+        """Return the first .kicad_pro in PROJECT_DIR (if any)."""
+        candidates = sorted(PROJECT_DIR.glob("*.kicad_pro"))
+        return candidates[0] if candidates else None
+
+    def on_toggle_log(self, event):
+        """Open or focus a separate log window without resizing main layout."""
+        if self.log_popup and self.log_popup.IsShown():
+            self.log_popup.Raise()
+            self.log_popup.Restore()
+            return
+
+        dlg = wx.Frame(self, title="Log", size=(900, 500))
+        panel = wx.Panel(dlg)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        ctrl = wx.TextCtrl(panel, style=wx.TE_MULTILINE | wx.TE_READONLY)
+        ctrl.SetValue(self.log_ctrl.GetValue())
+        sizer.Add(ctrl, 1, wx.EXPAND | wx.ALL, 5)
+        panel.SetSizer(sizer)
+        dlg.Centre()
+
+        def on_close(evt):
+            self.log_popup = None
+            self.log_popup_ctrl = None
+            evt.Skip()
+
+        dlg.Bind(wx.EVT_CLOSE, on_close)
+        self.log_popup = dlg
+        self.log_popup_ctrl = ctrl
+        dlg.Show()
+
+    def _apply_log_visibility(self, show: bool, save_pref: bool = True):
+        """Show/hide inline log panel and save preference."""
+        self.log_panel.Show(show)
+        self.log_panel.SetMinSize((-1, 120 if show else 0))
+        self.btn_toggle_log.Enable(show)
+        if not show and self.log_popup:
+            self.log_popup.Destroy()
+            self.log_popup = None
+            self.log_popup_ctrl = None
+        # Re-layout immediately so other content expands/collapses without restart
+        self.log_panel.Layout()
+        if hasattr(self, "panel"):
+            self.panel.Layout()
+        self.Layout()
+        self.SendSizeEvent()
+        if save_pref:
+            cfg = load_config()
+            cfg[SHOW_LOG_KEY] = show
+            save_config(cfg)
+
+    def on_toggle_show_log(self, event):
+        """Handle 'Show log' checkbox toggling."""
+        show = self.chk_show_log.IsChecked()
+        self._apply_log_visibility(show)
+
+    def on_open_project(self, event):
+        """Open the KiCad project file with the default application."""
+        if not self.project_file or not self.project_file.exists():
+            self.append_log("[ERROR] No .kicad_pro file found to open.")
+            return
+        try:
+            if os.name == "nt":
+                os.startfile(str(self.project_file))
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(self.project_file)])
+            else:
+                subprocess.Popen(["xdg-open", str(self.project_file)])
+            self.append_log(f"[OK] Opening project: {self.project_file.name}")
+        except Exception as e:
+            self.append_log(f"[ERROR] Could not open project: {e}")
 
     # ---------- Data helpers ----------
     def _make_status_icon(self, colour: wx.Colour, size=12):
@@ -796,17 +918,19 @@ class MouserAutoOrderTab(wx.Panel):
         self.order_client = self.mouser.MouserOrderClient() # Mouser order API client
         self.current_bom_file = None
         self.current_data_array = None
+        self.temp_bom_dir = Path(tempfile.gettempdir()) / "kicad_mouser_bom"
+        self.temp_bom_dir.mkdir(parents=True, exist_ok=True)
 
         s = wx.BoxSizer(wx.VERTICAL)
 
         # Top controls
         top = wx.BoxSizer(wx.HORIZONTAL)
+        self.btn_generate_bom = wx.Button(self, label="Generate Project BOM")
+        self.btn_generate_bom.SetToolTip(
+            "Use kicad-cli to generate a BOM from the current project, then load it here."
+        )
         self.btn_open_bom = wx.Button(self, label="Open BOM CSV...")
         self.btn_open_bom.SetToolTip("Open a BOM CSV file to load parts from.")
-        self.btn_reload = wx.Button(self, label="Reload BOM")
-        self.btn_reload.SetToolTip(
-            "Reload the currently opened BOM file. If changes were made externally, they will be reflected."
-        )
         self.btn_submit = wx.Button(self, label="Submit Cart to Mouser")
         self.btn_submit.SetToolTip(
             "Submit the current selection to Mouser shopping cart via API.\n\n"
@@ -814,12 +938,14 @@ class MouserAutoOrderTab(wx.Panel):
         )
         
         # Set button icons
+        set_button_icon(self.btn_generate_bom, wx.ART_REPORT_VIEW)
         set_button_icon(self.btn_open_bom, wx.ART_FOLDER_OPEN)
-        set_button_icon(self.btn_reload, wx.ART_UNDO)
         set_button_icon(self.btn_submit, wx.ART_GO_DIR_UP)
 
+        top.Add(self.btn_generate_bom, 1, wx.EXPAND | wx.RIGHT, 6)
         top.Add(self.btn_open_bom, 1, wx.EXPAND | wx.RIGHT, 6)
-        top.Add(self.btn_reload, 1, wx.EXPAND | wx.RIGHT, 6)
+        sep = wx.StaticLine(self, style=wx.LI_VERTICAL)
+        top.Add(sep, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 6)
         top.Add(self.btn_submit, 1, wx.EXPAND)
         s.Add(top, 0, wx.ALL, 0)
         s.AddSpacer(10)
@@ -859,6 +985,9 @@ class MouserAutoOrderTab(wx.Panel):
         self.col_ref     = self.dv.AppendTextColumn("Reference", width=250)
         self.col_mnr     = self.dv.AppendTextColumn("Mouser Number", width=200)
         self.col_qty     = self.dv.AppendTextColumn("Qty", width=80)
+        self.col_extra   = self.dv.AppendTextColumn(
+            "Extra Qty", width=90, mode=dv.DATAVIEW_CELL_EDITABLE
+        )
         self.dv.SetDropTarget(BOMFileDropTarget(self))
         self.SetDropTarget(BOMFileDropTarget(self))
         s.Add(self.dv, 1, wx.EXPAND | wx.ALL, 0)
@@ -866,8 +995,8 @@ class MouserAutoOrderTab(wx.Panel):
         self.SetSizer(s)
 
         # ---------- Bind events ----------
+        self.btn_generate_bom.Bind(wx.EVT_BUTTON, self.on_generate_bom)
         self.btn_open_bom.Bind(wx.EVT_BUTTON, self.on_open_bom)
-        self.btn_reload.Bind(wx.EVT_BUTTON, self.on_reload_bom)
         self.btn_submit.Bind(wx.EVT_BUTTON, self.on_submit_order)
         self.choice_mnr.Bind(wx.EVT_COMBOBOX, self.on_mnr_changed)
         self.Bind(wx.EVT_CHECKBOX, self.on_master_mouser_toggle, self.chk_master_mouser)
@@ -894,12 +1023,97 @@ class MouserAutoOrderTab(wx.Panel):
             self.load_bom(path)
 
 
-    def on_reload_bom(self, evt):
-        """Reload the current BOM file to refresh data in case of external edits."""
-        if not self.current_bom_file:
-            self.log("[WARN] No BOM file selected to reload.")
+    def on_generate_bom(self, evt):
+        """Generate BOM from current KiCad project using kicad-cli, then open and load it."""
+        schematic = self._find_project_schematic()
+        if not schematic:
+            self.log("[ERROR] Keine .kicad_sch Datei im Projekt gefunden.")
             return
-        self.load_bom(self.current_bom_file)
+
+        kicad_cli = shutil.which("kicad-cli")
+        if not kicad_cli:
+            self.log("[ERROR] kicad-cli nicht gefunden. Bitte in PATH aufnehmen.")
+            return
+
+        bom_path = self.temp_bom_dir / f"{schematic.stem}_bom.csv"
+
+        fields = "Reference,Value,Footprint,MNR,LCSC,${QUANTITY}"
+        labels = "Reference,Value,Footprint,MNR,LCSC,Qty"
+        cmd = [
+            kicad_cli,
+            "sch",
+            "export",
+            "bom",
+            str(schematic),
+            "--output",
+            str(bom_path),
+            "--fields",
+            fields,
+            "--labels",
+            labels,
+            "--exclude-dnp",
+        ]
+        self.log(f"[INFO] Generiere BOM aus {schematic.name} ...")
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True)
+        except Exception as e:
+            self.log(f"[ERROR] kicad-cli Aufruf fehlgeschlagen: {e}")
+            return
+
+        if res.returncode != 0:
+            err = res.stderr.strip() or res.stdout.strip() or "Unbekannter Fehler"
+            self.log(f"[ERROR] BOM-Export fehlgeschlagen: {err}")
+            return
+
+        self._normalize_bom_headers(bom_path)
+        self.current_bom_file = str(bom_path)
+        self.load_bom(str(bom_path))
+        self.log(f"[OK] BOM erzeugt und in Mouser-Tab geladen: {bom_path.name}")
+
+    def _find_project_schematic(self) -> Path | None:
+        """Return preferred schematic for BOM export (matching the .kicad_pro stem)."""
+        proj_files = sorted(PROJECT_DIR.glob("*.kicad_pro"))
+        if proj_files:
+            preferred = PROJECT_DIR / f"{proj_files[0].stem}.kicad_sch"
+            if preferred.exists():
+                return preferred
+        fallback = PROJECT_DIR / "Project.kicad_sch"
+        if fallback.exists():
+            return fallback
+        top_level = sorted(PROJECT_DIR.glob("*.kicad_sch"))
+        if top_level:
+            return top_level[0]
+        nested = sorted(PROJECT_DIR.rglob("*.kicad_sch"))
+        if nested:
+            return nested[0]
+        return None
+
+    def _normalize_bom_headers(self, bom_path: Path):
+        """Rename KiCad 'Quantity' column to 'Qty' for Mouser importer expectations."""
+        try:
+            with open(bom_path, newline="", encoding="utf-8") as f:
+                reader = list(csv.DictReader(f))
+                fieldnames = reader[0].keys() if reader else []
+        except Exception as e:
+            self.log(f"[WARN] BOM konnte nicht geprüft werden: {e}")
+            return
+
+        if not fieldnames:
+            return
+
+        fieldnames = list(fieldnames)
+        mapped = ["Qty" if h == "Quantity" else h for h in fieldnames]
+        if mapped == fieldnames:
+            return
+
+        try:
+            with open(bom_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=mapped)
+                writer.writeheader()
+                for row in reader:
+                    writer.writerow({new: row.get(old, "") for new, old in zip(mapped, fieldnames)})
+        except Exception as e:
+            self.log(f"[WARN] Konnte BOM-Header nicht anpassen: {e}")
 
     def load_bom(self, bom_path):
         """
@@ -934,7 +1148,7 @@ class MouserAutoOrderTab(wx.Panel):
             mnrs = data.get(mnr_col, [""] * len(refs))
             qtys = data.get("Qty", [""] * len(refs))
             for ref, mnr, qty in zip(refs, mnrs, qtys):
-                self.dv.GetStore().AppendItem([True, str(ref), str(mnr), str(qty)])
+                self.dv.GetStore().AppendItem([True, str(ref), str(mnr), str(qty), "0"])
                 
             self.log(f"[OK] Loaded {len(refs)} BOM rows.")
             self._update_master_mouser_state()
@@ -957,7 +1171,7 @@ class MouserAutoOrderTab(wx.Panel):
         qtys = self.current_data_array.get("Qty", [""] * len(refs))
 
         for ref, mnr, qty in zip(refs, mnrs, qtys):
-            store.AppendItem([True, str(ref), str(mnr), str(qty)])
+            store.AppendItem([True, str(ref), str(mnr), str(qty), "0"])
         self._update_master_mouser_state()
 
     def _update_master_mouser_state(self):
@@ -994,6 +1208,7 @@ class MouserAutoOrderTab(wx.Panel):
         """
         store = self.dv.GetStore()
         refs, mnrs, qtys = [], [], []
+        extras = []
         col_mnr_name = self.choice_mnr.GetValue() or self.mouser.CSV_MOUSER_COLUMN_NAME
         for row in range(store.GetCount()):
             include_flag = store.GetValueByRow(row, 0)
@@ -1002,11 +1217,13 @@ class MouserAutoOrderTab(wx.Panel):
             refs.append(store.GetValueByRow(row, 1))
             mnrs.append(store.GetValueByRow(row, 2))
             qtys.append(store.GetValueByRow(row, 3))
+            extras.append(store.GetValueByRow(row, 4))
         return {
             "Reference": refs,
             col_mnr_name: mnrs,
             "MNR_Column_Name": col_mnr_name,
             "Qty": qtys,
+            "ExtraQty": extras,
             "Multiplier": int(self.multiplier.GetValue() or 1),
         }
 
