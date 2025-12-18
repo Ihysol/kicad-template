@@ -615,20 +615,8 @@
   },
   "sheets": [
     [
-      "9d5b0cb7-3f9f-4216-9329-ed15d36fd594",
+      "46250d52-b795-4a98-85ac-3240fffef411",
       "Root"
-    ],
-    [
-      "0d150af5-958a-40c6-a4fc-62b10c7d1839",
-      "LED_RED"
-    ],
-    [
-      "992483d4-3fd8-4ead-a23b-3535abee7588",
-      "LED_GREEN"
-    ],
-    [
-      "804cfc2f-f185-4fa6-8d56-9bae4af816da",
-      "LED_BLUE"
     ]
   ],
   "text_variables": {}
