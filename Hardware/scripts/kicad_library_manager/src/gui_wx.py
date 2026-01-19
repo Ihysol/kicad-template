@@ -8,6 +8,7 @@ import threading
 import time
 from pathlib import Path
 
+import multiprocessing as mp
 import wx
 import wx.dataview as dv
 from sexpdata import Symbol, loads
@@ -126,9 +127,246 @@ class ZipFileDropTarget(wx.FileDropTarget):
 
         if dropped:
             wx.CallAfter(self.parent.append_log, f"[OK] Added {len(dropped)} ZIP archive(s).")
-            wx.CallAfter(self.parent.refresh_zip_list)
+            wx.CallAfter(self.parent.refresh_zip_list_async)
 
         return True
+
+
+# ===============================
+# multiprocessing helpers
+# ===============================
+def _scan_zip_folder_worker(folder_str: str, queue) -> None:
+    from pathlib import Path
+    from gui_core import scan_zip_folder
+    try:
+        rows = scan_zip_folder(Path(folder_str))
+        queue.put(("ok", rows))
+    except Exception as e:
+        queue.put(("error", str(e)))
+
+
+def _process_archives_worker(paths, is_purge, rename_assets, use_symbol_name, queue) -> None:
+    from pathlib import Path
+    from gui_core import process_archives
+    try:
+        ok = process_archives(
+            [Path(p) for p in paths],
+            is_purge=is_purge,
+            rename_assets=rename_assets,
+            use_symbol_name=use_symbol_name,
+        )
+        queue.put(("ok", ok))
+    except Exception as e:
+        queue.put(("error", str(e)))
+
+
+def _list_symbols_worker(queue) -> None:
+    from gui_core import list_project_symbols
+    try:
+        symbols = list_project_symbols()
+        queue.put(("ok", symbols))
+    except Exception as e:
+        queue.put(("error", str(e)))
+
+
+def _export_symbols_worker(selected_symbols, queue) -> None:
+    from gui_core import export_symbols_with_checks
+    try:
+        success, export_paths = export_symbols_with_checks(selected_symbols)
+        queue.put(("ok", success, [str(p) for p in export_paths]))
+    except Exception as e:
+        queue.put(("error", str(e)))
+
+
+def _delete_symbols_worker(selected_symbols, queue) -> None:
+    try:
+        from library_manager import PROJECT_SYMBOL_LIB, PROJECT_FOOTPRINT_LIB, PROJECT_3D_DIR
+        from sexpdata import loads, dumps
+
+        deleted_syms = deleted_fp = deleted_3d = 0
+        linked_footprints = set()
+
+        with open(PROJECT_SYMBOL_LIB, "r", encoding="utf-8") as f:
+            sym_data = loads(f.read())
+
+        new_sym_data = [sym_data[0]]
+        for el in sym_data[1:]:
+            if not (isinstance(el, list) and len(el) > 1 and str(el[0]) == "symbol"):
+                new_sym_data.append(el)
+                continue
+
+            sym_name = str(el[1])
+            if sym_name in selected_symbols:
+                for item in el:
+                    if (
+                        isinstance(item, list)
+                        and len(item) >= 3
+                        and str(item[0]) == "property"
+                        and str(item[1]) == "Footprint"
+                    ):
+                        fp_name = str(item[2]).split(":")[-1]
+                        linked_footprints.add(fp_name)
+                deleted_syms += 1
+                continue
+            new_sym_data.append(el)
+
+        if deleted_syms:
+            with open(PROJECT_SYMBOL_LIB, "w", encoding="utf-8") as f:
+                f.write(dumps(new_sym_data, pretty_print=True))
+
+        for fp_name in linked_footprints:
+            fp_path = PROJECT_FOOTPRINT_LIB / f"{fp_name}.kicad_mod"
+            if fp_path.exists():
+                fp_path.unlink()
+                deleted_fp += 1
+            stp_path = PROJECT_3D_DIR / f"{fp_name}.stp"
+            if stp_path.exists():
+                stp_path.unlink()
+                deleted_3d += 1
+
+        queue.put(("ok", deleted_syms, deleted_fp, deleted_3d))
+    except Exception as e:
+        queue.put(("error", str(e)))
+
+
+def _update_drc_worker(queue) -> None:
+    from gui_core import update_drc_rules
+    try:
+        ok = update_drc_rules()
+        queue.put(("ok", ok))
+    except Exception as e:
+        queue.put(("error", str(e)))
+
+
+def _find_kicad_cli_path() -> str | None:
+    kicad_cli = shutil.which("kicad-cli")
+    if kicad_cli:
+        return kicad_cli
+
+    if os.name == "nt":
+        candidates = []
+        for env_key in ("ProgramFiles", "ProgramFiles(x86)"):
+            base = os.environ.get(env_key)
+            if not base:
+                continue
+            kicad_root = Path(base) / "KiCad"
+            if not kicad_root.exists():
+                continue
+            for bin_path in kicad_root.glob("*\\bin\\kicad-cli.exe"):
+                candidates.append(bin_path)
+        if candidates:
+            return str(sorted(candidates)[-1])
+    return None
+
+
+def _normalize_bom_headers_inplace(bom_path: str) -> None:
+    try:
+        with open(bom_path, newline="", encoding="utf-8") as f:
+            reader = list(csv.DictReader(f))
+            fieldnames = reader[0].keys() if reader else []
+    except Exception:
+        return
+
+    if not fieldnames:
+        return
+
+    fieldnames = list(fieldnames)
+    mapped = ["Qty" if h == "Quantity" else h for h in fieldnames]
+    if mapped == fieldnames:
+        return
+
+    try:
+        with open(bom_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=mapped)
+            writer.writeheader()
+            for row in reader:
+                writer.writerow({new: row.get(old, "") for new, old in zip(mapped, fieldnames)})
+    except Exception:
+        return
+
+
+def _generate_bom_worker(schematic_path: str, bom_path: str, queue) -> None:
+    try:
+        kicad_cli = _find_kicad_cli_path()
+        if not kicad_cli:
+            queue.put(("error", "kicad-cli not found. Please add it to PATH or install KiCad."))
+            return
+
+        fields = "Reference,Value,Footprint,MNR,LCSC,${QUANTITY}"
+        labels = "Reference,Value,Footprint,MNR,LCSC,Qty"
+        cmd = [
+            kicad_cli,
+            "sch",
+            "export",
+            "bom",
+            schematic_path,
+            "--output",
+            bom_path,
+            "--fields",
+            fields,
+            "--labels",
+            labels,
+            "--exclude-dnp",
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0:
+            err = res.stderr.strip() or res.stdout.strip() or "Unbekannter Fehler"
+            queue.put(("error", f"BOM-Export fehlgeschlagen: {err}"))
+            return
+
+        _normalize_bom_headers_inplace(bom_path)
+        queue.put(("ok", bom_path))
+    except Exception as e:
+        queue.put(("error", str(e)))
+
+
+def _parse_bom_worker(bom_path: str, queue) -> None:
+    try:
+        from mouser_integration import BOMHandler
+        handler = BOMHandler()
+        data = handler.process_bom_file(bom_path)
+        queue.put(("ok", data))
+    except Exception as e:
+        queue.put(("error", str(e)))
+
+
+def _submit_order_worker(data_for_order: dict, queue) -> None:
+    import io
+    import contextlib
+    import time as _time
+    try:
+        import mouser_integration as mouser
+        client = mouser.MouserOrderClient()
+
+        class QueueWriter:
+            def write(self, s):
+                if s is None:
+                    return
+                for line in str(s).splitlines():
+                    if line.strip():
+                        queue.put(("log", line))
+            def flush(self): pass
+
+        with contextlib.redirect_stdout(QueueWriter()), contextlib.redirect_stderr(QueueWriter()):
+            attempts = 0
+            success = False
+            for attempts in range(mouser.API_TIMEOUT_MAX_RETRIES):
+                queue.put(("log", f"Attempt {attempts+1}/{mouser.API_TIMEOUT_MAX_RETRIES}"))
+                try:
+                    ok = client.order_parts_from_data_array(dict(data_for_order))
+                except Exception as e:
+                    ok = False
+                    queue.put(("log", f"Exception during order attempt: {e}"))
+                if ok:
+                    success = True
+                    break
+                if attempts < mouser.API_TIMEOUT_MAX_RETRIES - 1:
+                    queue.put(("log", f"Attempt failed. Retrying in {mouser.API_TIMEOUT_SLEEP_S} s..."))
+                    _time.sleep(mouser.API_TIMEOUT_SLEEP_S)
+            queue.put(("log", f"[INFO] Final result: Attempts -> {attempts+1}, Success -> {success}"))
+        queue.put(("ok", success))
+    except Exception as e:
+        queue.put(("error", str(e)))
 
 
 # ===============================
@@ -362,6 +600,15 @@ class MainFrame(wx.Frame):
         super().__init__(None, title=f"KiCad Library Manager (wxPython) - {APP_VERSION}", size=(1120, 800))
         self.current_folder = INPUT_ZIP_FOLDER.resolve()
         self.zip_rows = []
+        self._zip_busy = False
+        self._zip_scan_timer = None
+        self._zip_process_timer = None
+        self._sym_busy = False
+        self._sym_list_timer = None
+        self._sym_export_timer = None
+        self._sym_delete_timer = None
+        self._drc_busy = False
+        self._drc_timer = None
         self.InitUI()
         self._configure_logger()
         self.Centre()
@@ -729,10 +976,6 @@ class MainFrame(wx.Frame):
     
     def on_delete_selected(self, event):
         """Delete selected symbols (and linked footprints + 3D models)."""
-        from library_manager import PROJECT_SYMBOL_LIB, PROJECT_FOOTPRINT_LIB, PROJECT_3D_DIR
-        from sexpdata import loads, dumps, Symbol
-        import re, wx
-
         lst = self.symbol_list
         total = lst.GetCount()
         selected = [lst.GetString(i) for i in range(total) if lst.IsChecked(i)]
@@ -751,75 +994,7 @@ class MainFrame(wx.Frame):
             dlg.Destroy()
             return
         dlg.Destroy()
-
-        deleted_syms = deleted_fp = deleted_3d = 0
-        linked_footprints = set()
-
-        try:
-            with open(PROJECT_SYMBOL_LIB, "r", encoding="utf-8") as f:
-                sym_data = loads(f.read())
-        except Exception as e:
-            self.append_log(f"[ERROR] Failed to parse symbol library: {e}")
-            return
-
-        new_sym_data = [sym_data[0]]
-
-        # Remove selected symbols and collect linked footprints
-        for el in sym_data[1:]:
-            if not (isinstance(el, list) and len(el) > 1 and str(el[0]) == "symbol"):
-                new_sym_data.append(el)
-                continue
-
-            sym_name = str(el[1])
-            if sym_name in selected:
-                for item in el:
-                    if (
-                        isinstance(item, list)
-                        and len(item) >= 3
-                        and str(item[0]) == "property"
-                        and str(item[1]) == "Footprint"
-                    ):
-                        fp_name = str(item[2]).split(":")[-1]
-                        linked_footprints.add(fp_name)
-                deleted_syms += 1
-                continue
-            new_sym_data.append(el)
-
-        # Save updated symbol library
-        if deleted_syms:
-            try:
-                with open(PROJECT_SYMBOL_LIB, "w", encoding="utf-8") as f:
-                    f.write(dumps(new_sym_data, pretty_print=True))
-                self.append_log(f"[OK] Deleted {deleted_syms} symbol(s) from project library.")
-            except Exception as e:
-                self.append_log(f"[ERROR] Failed to update symbol lib: {e}")
-
-        # Delete linked footprints and 3D models
-        for fp_name in linked_footprints:
-            fp_path = PROJECT_FOOTPRINT_LIB / f"{fp_name}.kicad_mod"
-            if fp_path.exists():
-                try:
-                    fp_path.unlink()
-                    deleted_fp += 1
-                    self.append_log(f"[OK] Deleted footprint: {fp_path.name}")
-                except Exception as e:
-                    self.append_log(f"[ERROR] Could not delete {fp_path.name}: {e}")
-
-            stp_path = PROJECT_3D_DIR / f"{fp_name}.stp"
-            if stp_path.exists():
-                try:
-                    stp_path.unlink()
-                    deleted_3d += 1
-                    self.append_log(f"[OK] Deleted 3D model: {stp_path.name}")
-                except Exception as e:
-                    self.append_log(f"[ERROR] Could not delete {stp_path.name}: {e}")
-
-        self.append_log(
-            f"[INFO] Deleted {deleted_syms} symbols, {deleted_fp} footprints, {deleted_3d} 3D models."
-        )
-
-        # --- refresh export list (UI + backend sync) ---
-        wx.CallAfter(self.refresh_symbol_list)
+        self._start_delete_symbols(selected)
 
 
     
@@ -938,11 +1113,10 @@ class MainFrame(wx.Frame):
             event.Skip()
 
     def on_refresh_symbols(self, event):
-        self.append_log("[INFO] Refreshing symbols...")
-        self.refresh_symbol_list()
+        self.refresh_symbol_list_async()
 
     def on_refresh_zips(self, event):
-        self.refresh_zip_list()
+        self.refresh_zip_list_async()
 
     def on_master_symbols_toggle(self, event):
         checked = self.chk_master_symbols.IsChecked()
@@ -979,6 +1153,248 @@ class MainFrame(wx.Frame):
         self.txt_render_w.Enable(not busy)
         self.txt_render_h.Enable(not busy)
 
+    def _set_zip_busy(self, busy: bool):
+        self._zip_busy = busy
+        controls = [
+            self.btn_refresh_zips,
+            self.btn_process,
+            self.btn_purge,
+            self.btn_select,
+            self.btn_open,
+            self.chk_master_zip,
+            self.zip_file_list,
+        ]
+        for ctrl in controls:
+            try:
+                ctrl.Enable(not busy)
+            except Exception:
+                pass
+
+    def _set_symbols_busy(self, busy: bool):
+        self._sym_busy = busy
+        controls = [
+            self.btn_refresh_symbols,
+            self.btn_export,
+            self.btn_delete_selected,
+            self.chk_master_symbols,
+            self.symbol_list,
+        ]
+        for ctrl in controls:
+            try:
+                ctrl.Enable(not busy)
+            except Exception:
+                pass
+
+    def refresh_symbol_list_async(self):
+        if self._sym_busy:
+            return
+        self.append_log("[INFO] Refreshing project symbol list...")
+        self._set_symbols_busy(True)
+        ctx = mp.get_context("spawn")
+        self._sym_list_queue = ctx.Queue()
+        self._sym_list_process = ctx.Process(
+            target=_list_symbols_worker,
+            args=(self._sym_list_queue,),
+        )
+        self._sym_list_process.start()
+        if not self._sym_list_timer:
+            self._sym_list_timer = wx.Timer(self)
+            self.Bind(wx.EVT_TIMER, self._on_sym_list_poll, self._sym_list_timer)
+        self._sym_list_timer.Start(100)
+
+    def _on_sym_list_poll(self, event):
+        try:
+            status, payload = self._sym_list_queue.get_nowait()
+        except Exception:
+            return
+        self._sym_list_timer.Stop()
+        if self._sym_list_process and self._sym_list_process.is_alive():
+            self._sym_list_process.join(timeout=0)
+        self._set_symbols_busy(False)
+        if status == "ok":
+            self.refresh_symbol_list(symbols=payload)
+            self.append_log("[OK] Project symbol list refreshed.")
+        else:
+            self.append_log(f"[ERROR] Symbol refresh failed: {payload}")
+
+    def _start_export_symbols(self, selected_symbols):
+        if self._sym_busy:
+            return
+        self._set_symbols_busy(True)
+        ctx = mp.get_context("spawn")
+        self._sym_export_queue = ctx.Queue()
+        self._sym_export_process = ctx.Process(
+            target=_export_symbols_worker,
+            args=(selected_symbols, self._sym_export_queue),
+        )
+        self._sym_export_process.start()
+        if not self._sym_export_timer:
+            self._sym_export_timer = wx.Timer(self)
+            self.Bind(wx.EVT_TIMER, self._on_sym_export_poll, self._sym_export_timer)
+        self._sym_export_timer.Start(200)
+
+    def _on_sym_export_poll(self, event):
+        try:
+            status, success, _ = self._sym_export_queue.get_nowait()
+        except Exception:
+            return
+        self._sym_export_timer.Stop()
+        if self._sym_export_process and self._sym_export_process.is_alive():
+            self._sym_export_process.join(timeout=0)
+        self._set_symbols_busy(False)
+        if status == "ok" and success:
+            self.append_log("[OK] Export complete.")
+        elif status == "ok":
+            self.append_log("[FAIL] Export failed. See log for details.")
+        else:
+            self.append_log(f"[ERROR] Export failed: {success}")
+
+    def _start_delete_symbols(self, selected_symbols):
+        if self._sym_busy:
+            return
+        self._set_symbols_busy(True)
+        ctx = mp.get_context("spawn")
+        self._sym_delete_queue = ctx.Queue()
+        self._sym_delete_process = ctx.Process(
+            target=_delete_symbols_worker,
+            args=(selected_symbols, self._sym_delete_queue),
+        )
+        self._sym_delete_process.start()
+        if not self._sym_delete_timer:
+            self._sym_delete_timer = wx.Timer(self)
+            self.Bind(wx.EVT_TIMER, self._on_sym_delete_poll, self._sym_delete_timer)
+        self._sym_delete_timer.Start(200)
+
+    def _on_sym_delete_poll(self, event):
+        try:
+            status, deleted_syms, deleted_fp, deleted_3d = self._sym_delete_queue.get_nowait()
+        except Exception:
+            return
+        self._sym_delete_timer.Stop()
+        if self._sym_delete_process and self._sym_delete_process.is_alive():
+            self._sym_delete_process.join(timeout=0)
+        self._set_symbols_busy(False)
+        if status == "ok":
+            self.append_log(
+                f"[INFO] Deleted {deleted_syms} symbols, {deleted_fp} footprints, {deleted_3d} 3D models."
+            )
+            self.refresh_symbol_list_async()
+        else:
+            self.append_log(f"[ERROR] Delete failed: {deleted_syms}")
+
+    def _set_drc_busy(self, busy: bool):
+        self._drc_busy = busy
+        try:
+            self.btn_drc.Enable(not busy)
+        except Exception:
+            pass
+
+    def _start_drc_update(self):
+        if self._drc_busy:
+            return
+        self._set_drc_busy(True)
+        ctx = mp.get_context("spawn")
+        self._drc_queue = ctx.Queue()
+        self._drc_process = ctx.Process(target=_update_drc_worker, args=(self._drc_queue,))
+        self._drc_process.start()
+        if not self._drc_timer:
+            self._drc_timer = wx.Timer(self)
+            self.Bind(wx.EVT_TIMER, self._on_drc_poll, self._drc_timer)
+        self._drc_timer.Start(200)
+
+    def _on_drc_poll(self, event):
+        try:
+            status, payload = self._drc_queue.get_nowait()
+        except Exception:
+            return
+        self._drc_timer.Stop()
+        if self._drc_process and self._drc_process.is_alive():
+            self._drc_process.join(timeout=0)
+        self._set_drc_busy(False)
+        if status == "ok" and payload:
+            self.append_log("[OK] DRC updated successfully.")
+        elif status == "ok":
+            self.append_log("[FAIL] DRC update failed. See log for details.")
+        else:
+            self.append_log(f"[ERROR] DRC update failed: {payload}")
+
+    def refresh_zip_list_async(self):
+        """Scan ZIPs in a separate process and update the list."""
+        if self._zip_busy:
+            return
+        self.append_log("[INFO] Scanning ZIP archives...")
+        self._set_zip_busy(True)
+        self._start_zip_scan()
+
+    def _start_zip_scan(self):
+        ctx = mp.get_context("spawn")
+        self._zip_scan_queue = ctx.Queue()
+        self._zip_scan_process = ctx.Process(
+            target=_scan_zip_folder_worker,
+            args=(str(self.current_folder), self._zip_scan_queue),
+        )
+        self._zip_scan_process.start()
+        if not self._zip_scan_timer:
+            self._zip_scan_timer = wx.Timer(self)
+            self.Bind(wx.EVT_TIMER, self._on_zip_scan_poll, self._zip_scan_timer)
+        self._zip_scan_timer.Start(100)
+
+    def _on_zip_scan_poll(self, event):
+        try:
+            status, payload = self._zip_scan_queue.get_nowait()
+        except Exception:
+            return
+        self._zip_scan_timer.Stop()
+        if self._zip_scan_process and self._zip_scan_process.is_alive():
+            self._zip_scan_process.join(timeout=0)
+        self._set_zip_busy(False)
+        if status == "ok":
+            self.refresh_zip_list(rows=payload)
+            self.append_log("[OK] ZIP archive list refreshed.")
+        else:
+            self.append_log(f"[ERROR] ZIP scan failed: {payload}")
+
+    def _start_zip_process(self, paths, is_purge: bool, use_symbol_name: bool):
+        if self._zip_busy:
+            return
+        self.append_log("[INFO] Processing ZIP archives in background...")
+        self._set_zip_busy(True)
+        ctx = mp.get_context("spawn")
+        self._zip_process_queue = ctx.Queue()
+        self._zip_process = ctx.Process(
+            target=_process_archives_worker,
+            args=(
+                [str(p) for p in paths],
+                is_purge,
+                False,
+                use_symbol_name,
+                self._zip_process_queue,
+            ),
+        )
+        self._zip_process.start()
+        if not self._zip_process_timer:
+            self._zip_process_timer = wx.Timer(self)
+            self.Bind(wx.EVT_TIMER, self._on_zip_process_poll, self._zip_process_timer)
+        self._zip_process_timer.Start(200)
+
+    def _on_zip_process_poll(self, event):
+        try:
+            status, payload = self._zip_process_queue.get_nowait()
+        except Exception:
+            return
+        self._zip_process_timer.Stop()
+        if self._zip_process and self._zip_process.is_alive():
+            self._zip_process.join(timeout=0)
+        self._set_zip_busy(False)
+        if status == "ok" and payload:
+            self.append_log("[OK] Action complete. Refreshing lists...")
+            self.refresh_zip_list_async()
+            self.refresh_symbol_list()
+        elif status == "ok":
+            self.append_log("[FAIL] Action failed. See log for details.")
+        else:
+            self.append_log(f"[ERROR] Action failed: {payload}")
+
     def _load_and_set_board_images(self, top_path: str | None, bottom_path: str | None):
         try:
             bmp_top = wx.Bitmap(wx.Image(top_path)) if top_path else None
@@ -1003,7 +1419,7 @@ class MainFrame(wx.Frame):
         )
         if dlg.ShowModal() == wx.ID_OK:
             self.current_folder = Path(dlg.GetPath())
-            self.refresh_zip_list()
+            self.refresh_zip_list_async()
         dlg.Destroy()
 
     def on_open_folder(self, event):
@@ -1017,15 +1433,16 @@ class MainFrame(wx.Frame):
 
     def on_export(self, event):
         selected_symbols = self.collect_selected_symbols_for_export()
-        success, _ = export_symbols_with_checks(selected_symbols)
-        if success:
-            self.append_log("[OK] Export complete.")
+        if not selected_symbols:
+            self.append_log("[WARN] No symbols selected for export.")
+            return
+        self._start_export_symbols(selected_symbols)
 
     def on_open_output(self, event):
         open_output_folder()
 
     def on_drc_update(self, event):
-        update_drc_rules()
+        self._start_drc_update()
 
     def on_tab_changed(self, event):
         """Automatically refresh the correct list when switching tabs."""
@@ -1038,14 +1455,10 @@ class MainFrame(wx.Frame):
         tab_label = self.notebook.GetPageText(sel)
 
         if "Import ZIP" in tab_label:
-            self.append_log("[INFO] Refreshing ZIP archive list...")
-            self.refresh_zip_list()
-            self.append_log("[OK] ZIP archive list refreshed.")
+            self.refresh_zip_list_async()
 
         elif "Export Project" in tab_label:
-            self.append_log("[INFO] Refreshing project symbol list...")
-            self.refresh_symbol_list()
-            self.append_log("[OK] Project symbol list refreshed.")
+            self.refresh_symbol_list_async()
 
         elif "DRC" in tab_label:
             self.append_log("[INFO] DRC Manager ready.")
@@ -1108,25 +1521,7 @@ class MainFrame(wx.Frame):
 
     def _find_kicad_cli(self) -> str | None:
         """Locate kicad-cli via PATH or common install locations."""
-        kicad_cli = shutil.which("kicad-cli")
-        if kicad_cli:
-            return kicad_cli
-
-        if os.name == "nt":
-            candidates = []
-            for env_key in ("ProgramFiles", "ProgramFiles(x86)"):
-                base = os.environ.get(env_key)
-                if not base:
-                    continue
-                kicad_root = Path(base) / "KiCad"
-                if not kicad_root.exists():
-                    continue
-                for bin_path in kicad_root.glob("*\\bin\\kicad-cli.exe"):
-                    candidates.append(bin_path)
-            if candidates:
-                return str(sorted(candidates)[-1])
-
-        return None
+        return _find_kicad_cli_path()
 
     def _find_svg_converter(self) -> tuple[str | None, str | None]:
         """
@@ -1757,18 +2152,11 @@ class MainFrame(wx.Frame):
             return
 
         use_symbolname_as_ref = self.chk_use_symbol_name.GetValue()
-        ok = process_archives(
+        self._start_zip_process(
             active_files,
             is_purge=is_purge,
-            rename_assets=False,
             use_symbol_name=use_symbolname_as_ref,
         )
-        if ok:
-            self.append_log("[OK] Action complete. Refreshing lists...")
-            self.refresh_zip_list()
-            self.refresh_symbol_list()
-        else:
-            self.append_log("[FAIL] Action failed. See log for details.")
 
 class BOMFileDropTarget(wx.FileDropTarget):
     """Enable drag-and-drop of BOM CSV files onto the Mouser tab."""
@@ -1805,6 +2193,10 @@ class MouserAutoOrderTab(wx.Panel):
         self.current_data_array = None
         self.temp_bom_dir = Path(tempfile.gettempdir()) / "kicad_mouser_bom"
         self.temp_bom_dir.mkdir(parents=True, exist_ok=True)
+        self._mouser_busy = False
+        self._bom_generate_timer = None
+        self._bom_parse_timer = None
+        self._order_timer = None
 
         s = wx.BoxSizer(wx.VERTICAL)
 
@@ -1896,6 +2288,126 @@ class MouserAutoOrderTab(wx.Panel):
             except Exception:
                 pass
 
+    def _log_ui(self, text: str):
+        wx.CallAfter(self.log, text)
+
+    def _set_mouser_busy(self, busy: bool):
+        self._mouser_busy = busy
+        controls = [
+            self.btn_generate_bom,
+            self.btn_open_bom,
+            self.btn_submit,
+            self.choice_mnr,
+            self.multiplier,
+            self.chk_master_mouser,
+            self.dv,
+        ]
+        for ctrl in controls:
+            try:
+                ctrl.Enable(not busy)
+            except Exception:
+                pass
+
+    def _start_bom_generate(self, schematic_path: Path):
+        if self._mouser_busy:
+            return
+        self._set_mouser_busy(True)
+        bom_path = self.temp_bom_dir / f"{schematic_path.stem}_bom.csv"
+        ctx = mp.get_context("spawn")
+        self._bom_generate_queue = ctx.Queue()
+        self._bom_generate_process = ctx.Process(
+            target=_generate_bom_worker,
+            args=(str(schematic_path), str(bom_path), self._bom_generate_queue),
+        )
+        self._bom_generate_process.start()
+        if not self._bom_generate_timer:
+            self._bom_generate_timer = wx.Timer(self)
+            self.Bind(wx.EVT_TIMER, self._on_bom_generate_poll, self._bom_generate_timer)
+        self._bom_generate_timer.Start(200)
+
+    def _on_bom_generate_poll(self, event):
+        try:
+            status, payload = self._bom_generate_queue.get_nowait()
+        except Exception:
+            return
+        self._bom_generate_timer.Stop()
+        if self._bom_generate_process and self._bom_generate_process.is_alive():
+            self._bom_generate_process.join(timeout=0)
+        if status == "ok":
+            self.current_bom_file = payload
+            self._start_bom_parse(payload)
+        else:
+            self._log_ui(f"[ERROR] {payload}")
+            self._set_mouser_busy(False)
+
+    def _start_bom_parse(self, bom_path: str):
+        if not self._mouser_busy:
+            self._set_mouser_busy(True)
+        self._log_ui(f"[INFO] Loading BOM: {bom_path}")
+        ctx = mp.get_context("spawn")
+        self._bom_parse_queue = ctx.Queue()
+        self._bom_parse_process = ctx.Process(
+            target=_parse_bom_worker,
+            args=(bom_path, self._bom_parse_queue),
+        )
+        self._bom_parse_process.start()
+        if not self._bom_parse_timer:
+            self._bom_parse_timer = wx.Timer(self)
+            self.Bind(wx.EVT_TIMER, self._on_bom_parse_poll, self._bom_parse_timer)
+        self._bom_parse_timer.Start(200)
+
+    def _on_bom_parse_poll(self, event):
+        try:
+            status, payload = self._bom_parse_queue.get_nowait()
+        except Exception:
+            return
+        self._bom_parse_timer.Stop()
+        if self._bom_parse_process and self._bom_parse_process.is_alive():
+            self._bom_parse_process.join(timeout=0)
+        if status == "ok":
+            wx.CallAfter(self._apply_bom_data, payload)
+            self._log_ui(f"[OK] BOM loaded: {Path(self.current_bom_file).name}")
+        else:
+            self._log_ui(f"[ERROR] BOM load failed: {payload}")
+        self._set_mouser_busy(False)
+
+    def _start_submit_order(self, data_for_order: dict):
+        if self._mouser_busy:
+            return
+        self._set_mouser_busy(True)
+        ctx = mp.get_context("spawn")
+        self._order_queue = ctx.Queue()
+        self._order_process = ctx.Process(
+            target=_submit_order_worker,
+            args=(data_for_order, self._order_queue),
+        )
+        self._order_process.start()
+        if not self._order_timer:
+            self._order_timer = wx.Timer(self)
+            self.Bind(wx.EVT_TIMER, self._on_order_poll, self._order_timer)
+        self._order_timer.Start(200)
+
+    def _on_order_poll(self, event):
+        try:
+            msg = self._order_queue.get_nowait()
+        except Exception:
+            return
+        kind = msg[0]
+        if kind == "log":
+            self._log_ui(msg[1])
+            return
+
+        self._order_timer.Stop()
+        if self._order_process and self._order_process.is_alive():
+            self._order_process.join(timeout=0)
+        if kind == "ok" and msg[1]:
+            self._log_ui("[OK] Mouser order submitted successfully.")
+        elif kind == "ok":
+            self._log_ui("[FAIL] Mouser order failed. See log for details.")
+        else:
+            self._log_ui(f"[ERROR] Mouser order failed: {msg[1]}")
+        self._set_mouser_busy(False)
+
     # ---------- Event handlers ----------
     def on_open_bom(self, evt):
         """Open file dialog to pick a BOM CSV file and load it."""
@@ -1905,7 +2417,7 @@ class MouserAutoOrderTab(wx.Panel):
                 return
             path = fdg.GetPath()
             self.current_bom_file = path
-            self.load_bom(path)
+            self._start_bom_parse(path)
 
 
     def on_generate_bom(self, evt):
@@ -1914,46 +2426,8 @@ class MouserAutoOrderTab(wx.Panel):
         if not schematic:
             self.log("[ERROR] Keine .kicad_sch Datei im Projekt gefunden.")
             return
-
-        kicad_cli = self._find_kicad_cli()
-        if not kicad_cli:
-            self.log("[ERROR] kicad-cli nicht gefunden. Bitte in PATH aufnehmen.")
-            return
-
-        bom_path = self.temp_bom_dir / f"{schematic.stem}_bom.csv"
-
-        fields = "Reference,Value,Footprint,MNR,LCSC,${QUANTITY}"
-        labels = "Reference,Value,Footprint,MNR,LCSC,Qty"
-        cmd = [
-            kicad_cli,
-            "sch",
-            "export",
-            "bom",
-            str(schematic),
-            "--output",
-            str(bom_path),
-            "--fields",
-            fields,
-            "--labels",
-            labels,
-            "--exclude-dnp",
-        ]
         self.log(f"[INFO] Generiere BOM aus {schematic.name} ...")
-        try:
-            res = subprocess.run(cmd, capture_output=True, text=True)
-        except Exception as e:
-            self.log(f"[ERROR] kicad-cli Aufruf fehlgeschlagen: {e}")
-            return
-
-        if res.returncode != 0:
-            err = res.stderr.strip() or res.stdout.strip() or "Unbekannter Fehler"
-            self.log(f"[ERROR] BOM-Export fehlgeschlagen: {err}")
-            return
-
-        self._normalize_bom_headers(bom_path)
-        self.current_bom_file = str(bom_path)
-        self.load_bom(str(bom_path))
-        self.log(f"[OK] BOM erzeugt und in Mouser-Tab geladen: {bom_path.name}")
+        self._start_bom_generate(schematic)
 
     def _find_project_schematic(self) -> Path | None:
         """Return preferred schematic for BOM export (matching the .kicad_pro stem)."""
@@ -1972,6 +2446,10 @@ class MouserAutoOrderTab(wx.Panel):
         if nested:
             return nested[0]
         return None
+
+    def _find_kicad_cli(self) -> str | None:
+        """Compatibility wrapper for older code paths."""
+        return _find_kicad_cli_path()
 
     def _normalize_bom_headers(self, bom_path: Path):
         """Rename KiCad 'Quantity' column to 'Qty' for Mouser importer expectations."""
@@ -2002,30 +2480,34 @@ class MouserAutoOrderTab(wx.Panel):
 
     def load_bom(self, bom_path):
         """
-        Load BOM CSV using BOMHandler, populate MNR choices and DataView.
+        Load BOM CSV in a background process and apply results.
+        """
+        self.current_bom_file = bom_path
+        self._start_bom_parse(bom_path)
+
+    def _apply_bom_data(self, data):
+        """
+        Apply parsed BOM data to UI (choices + DataView).
         """
         try:
-            self.log(f"[INFO] Loading BOM: {bom_path}")
-            data = self.bom_handler.process_bom_file(bom_path)
-            
-            # Ensure required headers exist
             headers = list(data.keys())
             if "Reference" not in headers or "Qty" not in headers:
                 self.log("[ERROR] BOM missing required columns (Reference/Qty).")
                 return
-            
-            # Build MNR choices: any header except Reference/Qty
+
             choices = [h for h in headers if h not in ("Reference", "Qty")]
             if not choices:
-                choices = [self.mouser.CSV_MOUSER_COLUMN_NAME] # fallback: default MNR column name
+                choices = [self.mouser.CSV_MOUSER_COLUMN_NAME]
             self.choice_mnr.Clear()
             self.choice_mnr.AppendItems(choices)
-            self.choice_mnr.SetSelection(0)
-            self.multiplier.SetValue(5) # reset multiplier to default
+            default_idx = 0
+            if self.mouser.CSV_MOUSER_COLUMN_NAME in choices:
+                default_idx = choices.index(self.mouser.CSV_MOUSER_COLUMN_NAME)
+            self.choice_mnr.SetSelection(default_idx)
+            self.multiplier.SetValue(5)
 
             self.current_data_array = data
-            
-            # Populate DataView
+
             self.dv.GetStore().DeleteAllItems()
             mnr_col = self.choice_mnr.GetValue() or choices[0]
             self.col_mnr.SetTitle(mnr_col)
@@ -2034,12 +2516,12 @@ class MouserAutoOrderTab(wx.Panel):
             qtys = data.get("Qty", [""] * len(refs))
             for ref, mnr, qty in zip(refs, mnrs, qtys):
                 self.dv.GetStore().AppendItem([True, str(ref), str(mnr), str(qty), "0"])
-                
+
             self.log(f"[OK] Loaded {len(refs)} BOM rows.")
             self._update_master_mouser_state()
         except Exception as e:
-            self.log(f"[ERROR] Failed to load BOM: {e}")
-            
+            self.log(f"[ERROR] Failed to apply BOM data: {e}")
+
     def on_mnr_changed(self, evt):
         """Update DataView column when user selects a different MNR column."""
         if not self.current_data_array:
@@ -2113,7 +2595,7 @@ class MouserAutoOrderTab(wx.Panel):
         }
 
     def on_submit_order(self, evt):
-        """Submit selected BOM items to Mouser cart using a background thread."""
+        """Submit selected BOM items to Mouser cart using a background process."""
         if not self.current_data_array:
             self.log("[WARN] No BOM loaded.")
             return
@@ -2123,52 +2605,8 @@ class MouserAutoOrderTab(wx.Panel):
             self.log("[WARN] No items selected for ordering.")
             return
 
-        t = threading.Thread(target=self._run_order_thread, args=(data_for_order,), daemon=True)
-        t.start()
+        self._start_submit_order(data_for_order)
     
-    def _run_order_thread(self, data_for_order):
-        """
-        Run order submission in background thread.
-        Redirect stdout/stderr to GUI log, retry API requests on failure.
-        """
-        import sys as _sys
-        
-        class GuiWriter:
-            """Redirect stdout/stderr to GUI log callback."""
-            def __init__(self, write_fn):
-                self.write_fn = write_fn
-            def write(self, s):
-                if s is None:
-                    return
-                for line in str(s).splitlines():
-                    if line.strip() != "":
-                        wx.CallAfter(self.write_fn, line)
-            def flush(self): pass
-
-        old_stdout, old_stderr = _sys.stdout, _sys.stderr
-        _sys.stdout, _sys.stderr = GuiWriter(self.log), GuiWriter(self.log)
-
-        try:
-            # Retry mechanism for API submission
-            attempts = 0
-            success = False
-            for attempts in range(self.mouser.API_TIMEOUT_MAX_RETRIES):
-                self.log(f"Attempt {attempts+1}/{self.mouser.API_TIMEOUT_MAX_RETRIES}")
-                try:
-                    ok = self.order_client.order_parts_from_data_array(dict(data_for_order))
-                except Exception as e:
-                    ok = False
-                    self.log(f"Exception during order attempt: {e}")
-                if ok:
-                    success = True
-                    break
-                if attempts < self.mouser.API_TIMEOUT_MAX_RETRIES - 1:
-                    self.log(f"Attempt failed. Retrying in {self.mouser.API_TIMEOUT_SLEEP_S} s...")
-                    time.sleep(self.mouser.API_TIMEOUT_SLEEP_S)
-            self.log(f"[INFO] Final result: Attempts → {attempts+1}, Success → {success}")
-        finally:
-            _sys.stdout, _sys.stderr = old_stdout, old_stderr
-
 
 # ===============================
 # wx.App entry
@@ -2180,5 +2618,6 @@ class KiCadApp(wx.App):
         return True
 
 if __name__ == "__main__":
+    mp.freeze_support()
     app = KiCadApp(False)
     app.MainLoop()
