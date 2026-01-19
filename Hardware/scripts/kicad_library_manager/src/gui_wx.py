@@ -10,6 +10,7 @@ from pathlib import Path
 
 import wx
 import wx.dataview as dv
+from sexpdata import Symbol, loads
 
 from gui_core import (
     APP_VERSION,
@@ -130,6 +131,226 @@ class ZipFileDropTarget(wx.FileDropTarget):
         return True
 
 
+# ===============================
+# board preview panel (image + crop overlay)
+# ===============================
+class BoardPreviewPanel(wx.Panel):
+    """Panel that draws a scaled bitmap and interactive crop rectangle overlay."""
+    def __init__(self, parent, on_crop_change=None, on_select=None):
+        super().__init__(parent, style=wx.BORDER_SIMPLE)
+        self._bmp = None
+        self._scaled = None
+        self._last_size = wx.Size(0, 0)
+        self._crop = (0, 100, 0, 100)  # x0, x1, y0, y1 (percent)
+        self._image_rect = None  # wx.Rect of scaled bitmap in panel coords
+        self._drag_mode = None  # "move" or edges like "l","r","t","b","lt","rb",...
+        self._drag_anchor = None  # (x,y) at drag start
+        self._crop_at_drag = None
+        self._on_crop_change = on_crop_change
+        self._on_select = on_select
+        self._loading = False
+        self._loading_text = "Rendering..."
+        self.Bind(wx.EVT_PAINT, self._on_paint)
+        self.Bind(wx.EVT_SIZE, self._on_resize)
+        self.Bind(wx.EVT_LEFT_DOWN, self._on_left_down)
+        self.Bind(wx.EVT_LEFT_UP, self._on_left_up)
+        self.Bind(wx.EVT_MOTION, self._on_mouse_move)
+
+    def set_bitmap(self, bmp: wx.Bitmap | None):
+        self._bmp = bmp if (bmp and bmp.IsOk()) else None
+        self._scaled = None
+        self.Refresh()
+
+    def set_crop(self, crop: tuple[int, int, int, int]):
+        self._crop = crop
+        self.Refresh()
+
+    def get_crop(self) -> tuple[int, int, int, int]:
+        return self._crop
+
+    def set_loading(self, loading: bool, text: str | None = None):
+        self._loading = loading
+        if text:
+            self._loading_text = text
+        self.Refresh()
+
+    def _on_resize(self, event):
+        event.Skip()
+        self._scaled = None
+        self.Refresh()
+
+    def _get_scaled_bitmap(self) -> wx.Bitmap | None:
+        if not self._bmp:
+            return None
+        size = self.GetClientSize()
+        if size.width < 10 or size.height < 10:
+            return None
+        if self._scaled and self._last_size == size:
+            return self._scaled
+        img = self._bmp.ConvertToImage()
+        w, h = img.GetWidth(), img.GetHeight()
+        scale = min(size.width / w, size.height / h)
+        new_w = max(int(w * scale), 1)
+        new_h = max(int(h * scale), 1)
+        img = img.Scale(new_w, new_h, wx.IMAGE_QUALITY_HIGH)
+        self._scaled = wx.Bitmap(img)
+        self._last_size = size
+        return self._scaled
+
+    def _on_paint(self, event):
+        dc = wx.PaintDC(self)
+        dc.SetBackground(wx.Brush(self.GetBackgroundColour()))
+        dc.Clear()
+
+        bmp = self._get_scaled_bitmap()
+        if bmp:
+            panel_size = self.GetClientSize()
+            x = (panel_size.width - bmp.GetWidth()) // 2
+            y = (panel_size.height - bmp.GetHeight()) // 2
+            self._image_rect = wx.Rect(x, y, bmp.GetWidth(), bmp.GetHeight())
+            dc.DrawBitmap(bmp, x, y, True)
+
+            # draw crop rectangle
+            x0, x1, y0, y1 = self._crop
+            rect_x0 = x + int(bmp.GetWidth() * x0 / 100)
+            rect_x1 = x + int(bmp.GetWidth() * x1 / 100)
+            rect_y0 = y + int(bmp.GetHeight() * y0 / 100)
+            rect_y1 = y + int(bmp.GetHeight() * y1 / 100)
+            rect_w = max(rect_x1 - rect_x0, 1)
+            rect_h = max(rect_y1 - rect_y0, 1)
+            dc.SetBrush(wx.TRANSPARENT_BRUSH)
+            dc.SetPen(wx.Pen(wx.Colour(220, 50, 50), 2))
+            dc.DrawRectangle(rect_x0, rect_y0, rect_w, rect_h)
+
+        if self._loading:
+            panel_size = self.GetClientSize()
+            dc.SetBrush(wx.Brush(wx.Colour(0, 0, 0, 80)))
+            dc.SetPen(wx.TRANSPARENT_PEN)
+            dc.DrawRectangle(0, 0, panel_size.width, panel_size.height)
+            dc.SetTextForeground(wx.Colour(255, 255, 255))
+            dc.DrawLabel(self._loading_text, wx.Rect(0, 0, panel_size.width, panel_size.height), alignment=wx.ALIGN_CENTER)
+
+    def _on_left_down(self, event):
+        if not self._image_rect:
+            return
+        pos = event.GetPosition()
+        if self._on_select:
+            self._on_select()
+        if not self._image_rect.Contains(pos):
+            return
+        self._drag_mode = self._hit_test(pos)
+        if not self._drag_mode:
+            return
+        self._drag_anchor = (pos.x, pos.y)
+        self._crop_at_drag = self._crop
+        self.CaptureMouse()
+
+    def _on_left_up(self, event):
+        if self.HasCapture():
+            self.ReleaseMouse()
+        self._drag_mode = None
+        self._drag_anchor = None
+        self._crop_at_drag = None
+
+    def _on_mouse_move(self, event):
+        if not self._drag_mode or not self._drag_anchor or not self._crop_at_drag:
+            return
+        if not self._image_rect:
+            return
+        pos = event.GetPosition()
+        new_crop = self._compute_crop_from_drag(pos)
+        if new_crop and self._on_crop_change:
+            self._on_crop_change(new_crop)
+
+    def _hit_test(self, pos) -> str | None:
+        rect = self._image_rect
+        if not rect:
+            return None
+        x0, x1, y0, y1 = self._crop
+        left = rect.x + int(rect.width * x0 / 100)
+        right = rect.x + int(rect.width * x1 / 100)
+        top = rect.y + int(rect.height * y0 / 100)
+        bottom = rect.y + int(rect.height * y1 / 100)
+        margin = 6
+
+        near_left = abs(pos.x - left) <= margin
+        near_right = abs(pos.x - right) <= margin
+        near_top = abs(pos.y - top) <= margin
+        near_bottom = abs(pos.y - bottom) <= margin
+
+        if near_left and near_top:
+            return "lt"
+        if near_right and near_top:
+            return "rt"
+        if near_left and near_bottom:
+            return "lb"
+        if near_right and near_bottom:
+            return "rb"
+        if near_left:
+            return "l"
+        if near_right:
+            return "r"
+        if near_top:
+            return "t"
+        if near_bottom:
+            return "b"
+
+        if left < pos.x < right and top < pos.y < bottom:
+            return "move"
+        return None
+
+    def _compute_crop_from_drag(self, pos) -> tuple[int, int, int, int] | None:
+        rect = self._image_rect
+        if not rect:
+            return None
+        x0, x1, y0, y1 = self._crop_at_drag
+        min_size = 2  # percent
+
+        def clamp(v, lo=0, hi=100):
+            return max(min(v, hi), lo)
+
+        # convert mouse to percent
+        px = clamp(int((pos.x - rect.x) * 100 / rect.width))
+        py = clamp(int((pos.y - rect.y) * 100 / rect.height))
+
+        mode = self._drag_mode
+        if mode == "move":
+            dx = int((pos.x - self._drag_anchor[0]) * 100 / rect.width)
+            dy = int((pos.y - self._drag_anchor[1]) * 100 / rect.height)
+            nx0 = clamp(x0 + dx)
+            nx1 = clamp(x1 + dx)
+            ny0 = clamp(y0 + dy)
+            ny1 = clamp(y1 + dy)
+            # keep size
+            if nx1 - nx0 < min_size:
+                nx1 = nx0 + min_size
+            if ny1 - ny0 < min_size:
+                ny1 = ny0 + min_size
+            if nx1 > 100:
+                nx0 -= nx1 - 100
+                nx1 = 100
+            if ny1 > 100:
+                ny0 -= ny1 - 100
+                ny1 = 100
+            if nx0 < 0:
+                nx1 -= nx0
+                nx0 = 0
+            if ny0 < 0:
+                ny1 -= ny0
+                ny0 = 0
+            return (nx0, nx1, ny0, ny1)
+
+        nx0, nx1, ny0, ny1 = x0, x1, y0, y1
+        if "l" in mode:
+            nx0 = clamp(min(px, nx1 - min_size))
+        if "r" in mode:
+            nx1 = clamp(max(px, nx0 + min_size))
+        if "t" in mode:
+            ny0 = clamp(min(py, ny1 - min_size))
+        if "b" in mode:
+            ny1 = clamp(max(py, ny0 + min_size))
+        return (nx0, nx1, ny0, ny1)
+
 
 
 
@@ -138,7 +359,7 @@ class ZipFileDropTarget(wx.FileDropTarget):
 # ===============================
 class MainFrame(wx.Frame):
     def __init__(self):
-        super().__init__(None, title=f"KiCad Library Manager (wxPython) - {APP_VERSION}", size=(980, 800))
+        super().__init__(None, title=f"KiCad Library Manager (wxPython) - {APP_VERSION}", size=(1120, 800))
         self.current_folder = INPUT_ZIP_FOLDER.resolve()
         self.zip_rows = []
         self.InitUI()
@@ -209,10 +430,12 @@ class MainFrame(wx.Frame):
         self.tab_zip = wx.Panel(self.notebook)
         self.tab_symbol = wx.Panel(self.notebook)
         self.tab_drc = wx.Panel(self.notebook)
+        self.tab_board = wx.Panel(self.notebook)
         self.tab_mouser = MouserAutoOrderTab(self.notebook, log_callback=self.append_log)
         self.notebook.AddPage(self.tab_zip, "Import ZIP Archives")
         self.notebook.AddPage(self.tab_symbol, "Export Project Symbols")
         self.notebook.AddPage(self.tab_drc, "DRC Manager")
+        self.notebook.AddPage(self.tab_board, "Board Images")
         self.notebook.AddPage(self.tab_mouser, "Mouser Auto Order")
         vbox.Add(self.notebook, 1, wx.EXPAND | wx.ALL, 8)
 
@@ -333,6 +556,91 @@ class MainFrame(wx.Frame):
         self.drc_vbox.Add(self.btn_drc, 0, wx.BOTTOM, 5)
         self.tab_drc.SetSizer(self.drc_vbox)
 
+        # --- Board Images tab content ---
+        self.board_vbox = wx.BoxSizer(wx.VERTICAL)
+
+        self.board_controls = wx.BoxSizer(wx.HORIZONTAL)
+        self.board_controls.Add(
+            wx.StaticText(self.tab_board, label="Generate top/bottom board images from .kicad_pcb:"),
+            0,
+            wx.ALIGN_CENTER_VERTICAL | wx.RIGHT,
+            12,
+        )
+        self.btn_generate_board = wx.Button(self.tab_board, label="Generate from .kicad_pcb")
+        set_button_icon(self.btn_generate_board, wx.ART_EXECUTABLE_FILE)
+        self.btn_render_custom = wx.Button(self.tab_board, label="Crop to Frame")
+        set_button_icon(self.btn_render_custom, wx.ART_EXECUTABLE_FILE)
+        self.btn_save_board = wx.Button(self.tab_board, label="Save Previews")
+        set_button_icon(self.btn_save_board, wx.ART_FILE_SAVE_AS)
+        self.board_controls.Add(self.btn_generate_board, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
+        self.board_controls.Add(self.btn_render_custom, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
+        self.board_controls.Add(self.btn_save_board, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.board_vbox.Add(self.board_controls, 0, wx.EXPAND | wx.ALL, 8)
+
+        self.board_sizes = wx.FlexGridSizer(cols=4, vgap=4, hgap=8)
+        self.board_sizes.AddGrowableCol(1, 0)
+        self.board_sizes.AddGrowableCol(3, 0)
+
+        self.board_sizes.Add(wx.StaticText(self.tab_board, label="Width"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.txt_render_w = wx.TextCtrl(self.tab_board, value="2560", size=(70, -1))
+        self.board_sizes.Add(self.txt_render_w, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.board_sizes.Add(wx.StaticText(self.tab_board, label="Height"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.txt_render_h = wx.TextCtrl(self.tab_board, value="1440", size=(70, -1))
+        self.board_sizes.Add(self.txt_render_h, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.board_vbox.Add(self.board_sizes, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        self.preset_radio = wx.RadioBox(
+            self.tab_board,
+            label="Resolution Preset",
+            choices=["1080p", "2K", "4K", "8K"],
+            majorDimension=4,
+            style=wx.RA_SPECIFY_COLS,
+        )
+        self.preset_radio.SetSelection(1)  # 2K default
+        self.board_vbox.Add(self.preset_radio, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        self.lbl_crop_help = wx.StaticText(
+            self.tab_board,
+            label="Tip: Drag the red box to move/resize the crop frame.",
+        )
+        self.lbl_crop_help.SetFont(wx.Font(wx.FontInfo().Bold().Italic()))
+        self.lbl_crop_help.SetForegroundColour(wx.Colour(200, 80, 20))
+        self.board_vbox.Add(self.lbl_crop_help, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        self.board_hbox = wx.BoxSizer(wx.HORIZONTAL)
+        self.board_image_panel_top = BoardPreviewPanel(
+            self.tab_board,
+            on_crop_change=self._set_crop,
+            on_select=lambda: self._set_active_preview("top"),
+        )
+        self.board_image_panel_bottom = BoardPreviewPanel(
+            self.tab_board,
+            on_crop_change=self._set_crop,
+            on_select=lambda: self._set_active_preview("bottom"),
+        )
+        self.board_image_label_top = wx.StaticText(self.board_image_panel_top, label="")
+        self.board_image_label_top.SetBackgroundColour(wx.Colour(240, 240, 240))
+        self.board_image_label_top.SetForegroundColour(wx.Colour(60, 60, 60))
+        self.board_image_label_bottom = wx.StaticText(self.board_image_panel_bottom, label="")
+        self.board_image_label_bottom.SetBackgroundColour(wx.Colour(240, 240, 240))
+        self.board_image_label_bottom.SetForegroundColour(wx.Colour(60, 60, 60))
+
+        placeholder_top = self._make_placeholder_bitmap((520, 360), "Top image")
+        placeholder_bottom = self._make_placeholder_bitmap((520, 360), "Bottom image")
+        self.board_source_top = placeholder_top
+        self.board_source_bottom = placeholder_bottom
+        self._set_board_images(placeholder_top, placeholder_bottom)
+        self._set_crop((0, 100, 0, 100))
+        self.active_side = "top"
+        self._set_active_preview("top")
+        self.board_image_panel_top.Bind(wx.EVT_SIZE, self.on_board_image_resize)
+        self.board_image_panel_bottom.Bind(wx.EVT_SIZE, self.on_board_image_resize)
+
+        self.board_hbox.Add(self.board_image_panel_top, 1, wx.EXPAND | wx.ALL, 8)
+        self.board_hbox.Add(self.board_image_panel_bottom, 1, wx.EXPAND | wx.ALL, 8)
+        self.board_vbox.Add(self.board_hbox, 1, wx.EXPAND)
+        self.tab_board.SetSizer(self.board_vbox)
+
         # --- Log output ---
         self.log_panel = wx.Panel(panel)
         log_box = wx.BoxSizer(wx.VERTICAL)
@@ -399,6 +707,10 @@ class MainFrame(wx.Frame):
         self.zip_file_list.Bind(dv.EVT_DATAVIEW_ITEM_VALUE_CHANGED, self.on_zip_checkbox_changed)
         self.notebook.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self.on_tab_changed)
         self.Bind(wx.EVT_BUTTON, self.on_toggle_log, self.btn_toggle_log)
+        self.Bind(wx.EVT_BUTTON, self.on_generate_board_images, self.btn_generate_board)
+        self.Bind(wx.EVT_BUTTON, self.on_generate_custom_board_images, self.btn_render_custom)
+        self.Bind(wx.EVT_BUTTON, self.on_save_board_images, self.btn_save_board)
+        self.Bind(wx.EVT_RADIOBOX, self.on_preset_changed, self.preset_radio)
 
     # ---------- Event handlers ----------
     def on_resize_zip_columns(self, event):
@@ -655,6 +967,30 @@ class MainFrame(wx.Frame):
         if self.log_popup_ctrl:
             self.log_popup_ctrl.AppendText(text + "\n")
 
+    def _log_ui(self, text: str):
+        wx.CallAfter(self.append_log, text)
+
+    def _set_board_busy(self, busy: bool):
+        self._board_busy = busy
+        self.btn_generate_board.Enable(not busy)
+        self.btn_render_custom.Enable(not busy)
+        self.btn_save_board.Enable(not busy)
+        self.preset_radio.Enable(not busy)
+        self.txt_render_w.Enable(not busy)
+        self.txt_render_h.Enable(not busy)
+
+    def _load_and_set_board_images(self, top_path: str | None, bottom_path: str | None):
+        try:
+            bmp_top = wx.Bitmap(wx.Image(top_path)) if top_path else None
+            bmp_bottom = wx.Bitmap(wx.Image(bottom_path)) if bottom_path else None
+            self._set_board_images(bmp_top, bmp_bottom)
+            if top_path:
+                self.last_top_image_path = top_path
+            if bottom_path:
+                self.last_bottom_image_path = bottom_path
+        except Exception as e:
+            self.append_log(f"[WARN] Could not load PNG preview: {e}")
+
     def clear_log(self):
         self.log_ctrl.Clear()
 
@@ -714,6 +1050,9 @@ class MainFrame(wx.Frame):
         elif "DRC" in tab_label:
             self.append_log("[INFO] DRC Manager ready.")
 
+        elif "Board Images" in tab_label:
+            self.append_log("[INFO] Board Images ready.")
+
         elif "mouser" in tab_label.lower():
             self.append_log("[INFO] Mouser Auto Order ready.")
         event.Skip()
@@ -722,6 +1061,552 @@ class MainFrame(wx.Frame):
         """Return the first .kicad_pro in PROJECT_DIR (if any)."""
         candidates = sorted(PROJECT_DIR.glob("*.kicad_pro"))
         return candidates[0] if candidates else None
+
+    def _find_project_pcb(self) -> Path | None:
+        """Return preferred PCB file (matching .kicad_pro stem if possible)."""
+        proj_files = sorted(PROJECT_DIR.glob("*.kicad_pro"))
+        if proj_files:
+            preferred = PROJECT_DIR / f"{proj_files[0].stem}.kicad_pcb"
+            if preferred.exists():
+                return preferred
+        fallback = PROJECT_DIR / "Project.kicad_pcb"
+        if fallback.exists():
+            return fallback
+        top_level = sorted(PROJECT_DIR.glob("*.kicad_pcb"))
+        if top_level:
+            return top_level[0]
+        nested = sorted(PROJECT_DIR.rglob("*.kicad_pcb"))
+        if nested:
+            return nested[0]
+        return None
+
+    def _count_copper_layers(self, pcb_path: Path) -> int | None:
+        """Return number of copper layers in PCB file, or None on parse error."""
+        try:
+            with pcb_path.open("r", encoding="utf-8") as f:
+                sexpr = loads(f.read())
+        except Exception as e:
+            self.append_log(f"[ERROR] Failed to parse PCB file: {e}")
+            return None
+
+        layers_block = None
+        for e in sexpr:
+            if isinstance(e, list) and e and e[0] == Symbol("layers"):
+                layers_block = e
+                break
+        if not layers_block:
+            return 0
+
+        copper_layers = [
+            layer
+            for layer in layers_block[1:]
+            if isinstance(layer, list)
+            and len(layer) > 1
+            and str(layer[1]).endswith(".Cu")
+        ]
+        return len(copper_layers)
+
+    def _find_kicad_cli(self) -> str | None:
+        """Locate kicad-cli via PATH or common install locations."""
+        kicad_cli = shutil.which("kicad-cli")
+        if kicad_cli:
+            return kicad_cli
+
+        if os.name == "nt":
+            candidates = []
+            for env_key in ("ProgramFiles", "ProgramFiles(x86)"):
+                base = os.environ.get(env_key)
+                if not base:
+                    continue
+                kicad_root = Path(base) / "KiCad"
+                if not kicad_root.exists():
+                    continue
+                for bin_path in kicad_root.glob("*\\bin\\kicad-cli.exe"):
+                    candidates.append(bin_path)
+            if candidates:
+                return str(sorted(candidates)[-1])
+
+        return None
+
+    def _find_svg_converter(self) -> tuple[str | None, str | None]:
+        """
+        Return (tool, mode) for converting SVG -> PNG.
+        mode in {"magick", "rsvg", "inkscape"}.
+        """
+        magick = shutil.which("magick")
+        if magick:
+            return magick, "magick"
+        rsvg = shutil.which("rsvg-convert")
+        if rsvg:
+            return rsvg, "rsvg"
+        inkscape = shutil.which("inkscape")
+        if inkscape:
+            return inkscape, "inkscape"
+        return None, None
+
+    def _make_placeholder_bitmap(self, size, text: str) -> wx.Bitmap:
+        width, height = size
+        bmp = wx.Bitmap(width, height)
+        dc = wx.MemoryDC(bmp)
+        dc.SetBackground(wx.Brush(wx.Colour(235, 235, 235)))
+        dc.Clear()
+        dc.SetPen(wx.Pen(wx.Colour(200, 200, 200)))
+        dc.DrawRectangle(0, 0, width, height)
+        dc.SetTextForeground(wx.Colour(120, 120, 120))
+        dc.DrawLabel(text, wx.Rect(0, 0, width, height), alignment=wx.ALIGN_CENTER)
+        dc.SelectObject(wx.NullBitmap)
+        return bmp
+
+    def _set_board_images(self, top_bmp: wx.Bitmap | None, bottom_bmp: wx.Bitmap | None):
+        if top_bmp and top_bmp.IsOk():
+            self.board_source_top = top_bmp
+            self.board_image_panel_top.set_bitmap(top_bmp)
+            self._update_image_label(self.board_image_label_top, top_bmp, self.board_image_panel_top)
+        if bottom_bmp and bottom_bmp.IsOk():
+            self.board_source_bottom = bottom_bmp
+            self.board_image_panel_bottom.set_bitmap(bottom_bmp)
+            self._update_image_label(self.board_image_label_bottom, bottom_bmp, self.board_image_panel_bottom)
+
+    def _update_image_label(self, label: wx.StaticText, bmp: wx.Bitmap, panel: wx.Panel):
+        label.SetLabel(f"{bmp.GetWidth()} x {bmp.GetHeight()} px")
+        self._position_image_label(label, panel)
+
+    def _position_image_label(self, label: wx.StaticText, panel: wx.Panel):
+        padding = 6
+        size = label.GetBestSize()
+        panel_size = panel.GetClientSize()
+        x = max(panel_size.width - size.width - padding, 0)
+        y = max(panel_size.height - size.height - padding, 0)
+        label.SetPosition((x, y))
+        label.Raise()
+
+    def on_board_image_resize(self, event):
+        event.Skip()
+        self._set_board_images(
+            getattr(self, "board_source_top", None),
+            getattr(self, "board_source_bottom", None),
+        )
+        self._position_image_label(self.board_image_label_top, self.board_image_panel_top)
+        self._position_image_label(self.board_image_label_bottom, self.board_image_panel_bottom)
+
+    def _get_crop_values(self) -> tuple[int, int, int, int]:
+        return self.board_image_panel_top.get_crop()
+
+    def _set_crop(self, crop: tuple[int, int, int, int]):
+        self.board_image_panel_top.set_crop(crop)
+        self.board_image_panel_bottom.set_crop(crop)
+
+    def _set_active_preview(self, side: str):
+        self.active_side = side
+        active_color = wx.Colour(230, 240, 255)
+        inactive_color = self.tab_board.GetBackgroundColour()
+        if side == "top":
+            self.board_image_panel_top.SetBackgroundColour(active_color)
+            self.board_image_panel_bottom.SetBackgroundColour(inactive_color)
+        else:
+            self.board_image_panel_top.SetBackgroundColour(inactive_color)
+            self.board_image_panel_bottom.SetBackgroundColour(active_color)
+        self.board_image_panel_top.Refresh()
+        self.board_image_panel_bottom.Refresh()
+
+    def _set_render_preset(self, width: int, height: int):
+        self.txt_render_w.SetValue(str(width))
+        self.txt_render_h.SetValue(str(height))
+
+    def on_preset_changed(self, event):
+        idx = self.preset_radio.GetSelection()
+        presets = {
+            0: (1920, 1080),
+            1: (2560, 1440),
+            2: (3840, 2160),
+            3: (7680, 4320),
+        }
+        if idx in presets:
+            w, h = presets[idx]
+            self._set_render_preset(w, h)
+
+    def _auto_crop_from_alpha(self, img: wx.Image, margin_px: int = 20) -> tuple[int, int, int, int] | None:
+        """Return crop rectangle in percent based on non-transparent pixels."""
+        if not img.HasAlpha():
+            return None
+        w, h = img.GetWidth(), img.GetHeight()
+        data = img.GetAlpha()
+        if data is None:
+            return None
+
+        min_x, min_y = w, h
+        max_x, max_y = -1, -1
+        idx = 0
+        for y in range(h):
+            for x in range(w):
+                if data[idx] > 0:
+                    if x < min_x: min_x = x
+                    if y < min_y: min_y = y
+                    if x > max_x: max_x = x
+                    if y > max_y: max_y = y
+                idx += 1
+        if max_x < min_x or max_y < min_y:
+            return None
+
+        min_x = max(min_x - margin_px, 0)
+        min_y = max(min_y - margin_px, 0)
+        max_x = min(max_x + margin_px, w - 1)
+        max_y = min(max_y + margin_px, h - 1)
+
+        x0 = int(min_x * 100 / w)
+        x1 = int((max_x + 1) * 100 / w)
+        y0 = int(min_y * 100 / h)
+        y1 = int((max_y + 1) * 100 / h)
+        x0 = max(0, min(100, x0))
+        x1 = max(0, min(100, x1))
+        y0 = max(0, min(100, y0))
+        y1 = max(0, min(100, y1))
+        if x1 <= x0 or y1 <= y0:
+            return None
+        return (x0, x1, y0, y1)
+
+    def _parse_size_field(self, ctrl: wx.TextCtrl, label: str) -> int | None:
+        raw = ctrl.GetValue().strip()
+        if not raw.isdigit():
+            self.append_log(f"[ERROR] {label} must be a positive integer.")
+            return None
+        val = int(raw)
+        if val <= 0:
+            self.append_log(f"[ERROR] {label} must be greater than 0.")
+            return None
+        return val
+
+    def on_generate_custom_board_images(self, event):
+        """Crop existing generated images using the current crop frame."""
+        if getattr(self, "_board_busy", False):
+            return
+        self._set_board_busy(True)
+
+        def worker():
+            log = self._log_ui
+            top = getattr(self, "last_top_image_path", None) or getattr(self, "base_top_image_path", None)
+            bottom = getattr(self, "last_bottom_image_path", None) or getattr(self, "base_bottom_image_path", None)
+            if not top or not bottom or not Path(top).exists() or not Path(bottom).exists():
+                log("[ERROR] No generated PNGs available to crop. Click 'Generate Board Images' first.")
+                wx.CallAfter(self._set_board_busy, False)
+                return
+
+            wx.CallAfter(self.board_image_panel_top.set_loading, True, "Cropping...")
+            wx.CallAfter(self.board_image_panel_bottom.set_loading, True, "Cropping...")
+
+            top_path = Path(top)
+            bottom_path = Path(bottom)
+            cropped_top = self._apply_crop_to_png(
+                top_path,
+                top_path.with_name(f"{top_path.stem}_crop{top_path.suffix}"),
+                True,
+                log_fn=log,
+            )
+            cropped_bottom = self._apply_crop_to_png(
+                bottom_path,
+                bottom_path.with_name(f"{bottom_path.stem}_crop{bottom_path.suffix}"),
+                True,
+                log_fn=log,
+            )
+            if not cropped_top or not cropped_bottom:
+                wx.CallAfter(self.board_image_panel_top.set_loading, False)
+                wx.CallAfter(self.board_image_panel_bottom.set_loading, False)
+                wx.CallAfter(self._set_board_busy, False)
+                return
+
+            wx.CallAfter(self._load_and_set_board_images, str(cropped_top), str(cropped_bottom))
+            wx.CallAfter(self.board_image_panel_top.set_loading, False)
+            wx.CallAfter(self.board_image_panel_bottom.set_loading, False)
+            log("[OK] Cropped previews updated.")
+            wx.CallAfter(self._set_crop, (0, 100, 0, 100))
+            wx.CallAfter(self._set_board_busy, False)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_generate_board_images(self, event):
+        """Generate top/bottom board images via kicad-cli (full size, no crop)."""
+        if getattr(self, "_board_busy", False):
+            return
+        self._set_board_busy(True)
+        threading.Thread(
+            target=self._render_board_images,
+            args=((2560, 1440), (2560, 1440), False),
+            daemon=True,
+        ).start()
+
+    def on_save_board_images(self, event):
+        """Save last generated images as board_preview_top/bottom.png."""
+        top = getattr(self, "last_top_image_path", None)
+        bottom = getattr(self, "last_bottom_image_path", None)
+        if not top or not bottom or not Path(top).exists() or not Path(bottom).exists():
+            self.append_log("[ERROR] No generated PNGs available to save.")
+            return
+
+        dst_dir = PROJECT_DIR.parent / "Docs" / "img"
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        dst_top = dst_dir / "board_preview_top.png"
+        dst_bottom = dst_dir / "board_preview_bottom.png"
+        try:
+            shutil.copy2(top, dst_top)
+            shutil.copy2(bottom, dst_bottom)
+        except Exception as e:
+            self.append_log(f"[ERROR] Failed to save previews: {e}")
+            return
+        self.append_log(f"[OK] Saved previews: {dst_top.name}, {dst_bottom.name}")
+
+    def _apply_crop_to_png(
+        self,
+        src: Path,
+        dst: Path,
+        apply_crop: bool,
+        log_fn=None,
+    ) -> Path | None:
+        if not src.exists():
+            return None
+        try:
+            img = wx.Image(str(src))
+        except Exception as e:
+            if log_fn:
+                log_fn(f"[WARN] Could not open image for cropping: {e}")
+            else:
+                self.append_log(f"[WARN] Could not open image for cropping: {e}")
+            return None
+
+        x0, x1, y0, y1 = self._get_crop_values()
+        if not apply_crop:
+            return src
+        if (x0, x1, y0, y1) == (0, 100, 0, 100):
+            return src
+
+        w, h = img.GetWidth(), img.GetHeight()
+        cx0 = int(w * x0 / 100)
+        cx1 = int(w * x1 / 100)
+        cy0 = int(h * y0 / 100)
+        cy1 = int(h * y1 / 100)
+        if cx1 <= cx0 or cy1 <= cy0:
+            if log_fn:
+                log_fn("[ERROR] Invalid crop rectangle.")
+            else:
+                self.append_log("[ERROR] Invalid crop rectangle.")
+            return None
+
+        cropped = img.GetSubImage(wx.Rect(cx0, cy0, cx1 - cx0, cy1 - cy0))
+        if not cropped.IsOk():
+            if log_fn:
+                log_fn("[ERROR] Crop failed.")
+            else:
+                self.append_log("[ERROR] Crop failed.")
+            return None
+        cropped.SaveFile(str(dst), wx.BITMAP_TYPE_PNG)
+        return dst
+
+    def _render_board_images(self, top_size: tuple[int, int], bottom_size: tuple[int, int], apply_crop: bool):
+        log = self._log_ui
+        ui = wx.CallAfter
+        def finish():
+            ui(self.board_image_panel_top.set_loading, False)
+            ui(self.board_image_panel_bottom.set_loading, False)
+            ui(self._set_board_busy, False)
+
+        pcb = self._find_project_pcb()
+        if not pcb:
+            log("[ERROR] No .kicad_pcb file found in project.")
+            finish()
+            return
+        layer_count = self._count_copper_layers(pcb)
+        if layer_count is None:
+            finish()
+            return
+        if layer_count == 0:
+            log("[ERROR] No copper layers found. No board to render.")
+            finish()
+            return
+
+        kicad_cli = self._find_kicad_cli()
+        if not kicad_cli:
+            log("[ERROR] kicad-cli not found. Please add it to PATH or install KiCad.")
+            finish()
+            return
+
+        if not hasattr(self, "board_temp_dir"):
+            self.board_temp_dir = Path(tempfile.mkdtemp(prefix="kicad_board_"))
+        output_dir = self.board_temp_dir
+        top_svg = output_dir / f"{pcb.stem}_top.svg"
+        bottom_svg = output_dir / f"{pcb.stem}_bottom.svg"
+        top_png = output_dir / f"{pcb.stem}_top.png"
+        bottom_png = output_dir / f"{pcb.stem}_bottom.png"
+
+        log(f"[INFO] Exporting board images from {pcb.name} ...")
+        ui(self.board_image_panel_top.set_loading, True, "Rendering...")
+        ui(self.board_image_panel_bottom.set_loading, True, "Rendering...")
+
+        # Prefer direct render (PNG). Fallback to SVG export if render is unavailable.
+        cmd_render_top = [
+            kicad_cli,
+            "pcb",
+            "render",
+            "--output",
+            str(top_png),
+            "--width",
+            str(top_size[0]),
+            "--height",
+            str(top_size[1]),
+            "--side",
+            "top",
+            "--background",
+            "transparent",
+            "--quality",
+            "high",
+            str(pcb),
+        ]
+        cmd_render_bottom = [
+            kicad_cli,
+            "pcb",
+            "render",
+            "--output",
+            str(bottom_png),
+            "--width",
+            str(bottom_size[0]),
+            "--height",
+            str(bottom_size[1]),
+            "--side",
+            "bottom",
+            "--background",
+            "transparent",
+            "--quality",
+            "high",
+            str(pcb),
+        ]
+
+        try:
+            res_top = subprocess.run(cmd_render_top, capture_output=True, text=True)
+            res_bottom = subprocess.run(cmd_render_bottom, capture_output=True, text=True)
+        except Exception as e:
+            log(f"[ERROR] kicad-cli call failed: {e}")
+            finish()
+            return
+
+        if res_top.returncode == 0 and res_bottom.returncode == 0 and top_png.exists():
+            self.base_top_image_path = str(top_png)
+            self.base_bottom_image_path = str(bottom_png)
+            crop_top = self._apply_crop_to_png(
+                top_png, output_dir / f"{pcb.stem}_top_crop.png", apply_crop, log_fn=log
+            )
+            crop_bottom = self._apply_crop_to_png(
+                bottom_png, output_dir / f"{pcb.stem}_bottom_crop.png", apply_crop, log_fn=log
+            )
+            try:
+                img_top = wx.Image(str(crop_top or top_png))
+                if not apply_crop:
+                    auto_crop = self._auto_crop_from_alpha(img_top, margin_px=20)
+                    if auto_crop:
+                        ui(self._set_crop, auto_crop)
+                ui(
+                    self._load_and_set_board_images,
+                    str(crop_top or top_png),
+                    str(crop_bottom or bottom_png),
+                )
+            except Exception as e:
+                log(f"[WARN] Could not load PNG preview: {e}")
+            if apply_crop and (crop_top or crop_bottom):
+                log(f"[OK] Board images saved: {top_png.name}, {bottom_png.name} (cropped)")
+            else:
+                log(f"[OK] Board images saved: {top_png.name}, {bottom_png.name}")
+            finish()
+            return
+
+        render_err = (res_top.stderr or res_top.stdout or "").strip()
+        if render_err:
+            log(f"[WARN] Render failed, falling back to SVG export: {render_err}")
+
+        cmd_top = [
+            kicad_cli,
+            "pcb",
+            "export",
+            "svg",
+            str(pcb),
+            "--output",
+            str(top_svg),
+            "--layers",
+            "F.Cu,F.SilkS,Edge.Cuts",
+        ]
+        cmd_bottom = [
+            kicad_cli,
+            "pcb",
+            "export",
+            "svg",
+            str(pcb),
+            "--output",
+            str(bottom_svg),
+            "--layers",
+            "B.Cu,B.SilkS,Edge.Cuts",
+        ]
+
+        try:
+            res_top = subprocess.run(cmd_top, capture_output=True, text=True)
+            res_bottom = subprocess.run(cmd_bottom, capture_output=True, text=True)
+        except Exception as e:
+            log(f"[ERROR] kicad-cli call failed: {e}")
+            finish()
+            return
+
+        if res_top.returncode != 0:
+            err = res_top.stderr.strip() or res_top.stdout.strip() or "Unknown error"
+            log(f"[ERROR] Top image export failed: {err}")
+            finish()
+            return
+
+        if res_bottom.returncode != 0:
+            err = res_bottom.stderr.strip() or res_bottom.stdout.strip() or "Unknown error"
+            log(f"[ERROR] Bottom image export failed: {err}")
+            finish()
+            return
+
+        converter, mode = self._find_svg_converter()
+        if converter and top_svg.exists() and bottom_svg.exists():
+            log("[INFO] Converting SVGs to PNG for preview...")
+            try:
+                if mode == "magick":
+                    subprocess.run([converter, str(top_svg), str(top_png)], capture_output=True, text=True)
+                    subprocess.run([converter, str(bottom_svg), str(bottom_png)], capture_output=True, text=True)
+                elif mode == "rsvg":
+                    subprocess.run([converter, str(top_svg), "-o", str(top_png)], capture_output=True, text=True)
+                    subprocess.run([converter, str(bottom_svg), "-o", str(bottom_png)], capture_output=True, text=True)
+                elif mode == "inkscape":
+                    subprocess.run([converter, str(top_svg), "--export-type=png", f"--export-filename={top_png}"], capture_output=True, text=True)
+                    subprocess.run([converter, str(bottom_svg), "--export-type=png", f"--export-filename={bottom_png}"], capture_output=True, text=True)
+            except Exception as e:
+                log(f"[WARN] SVG conversion failed: {e}")
+
+        if top_png.exists():
+            self.base_top_image_path = str(top_png)
+            self.base_bottom_image_path = str(bottom_png)
+            crop_top = self._apply_crop_to_png(
+                top_png, output_dir / f"{pcb.stem}_top_crop.png", apply_crop, log_fn=log
+            )
+            crop_bottom = self._apply_crop_to_png(
+                bottom_png, output_dir / f"{pcb.stem}_bottom_crop.png", apply_crop, log_fn=log
+            )
+            try:
+                ui(
+                    self._load_and_set_board_images,
+                    str(crop_top or top_png),
+                    str(crop_bottom or bottom_png),
+                )
+            except Exception as e:
+                log(f"[WARN] Could not load PNG preview: {e}")
+        else:
+            ui(
+                self._set_board_images,
+                self._make_placeholder_bitmap((520, 360), "Top SVG saved (no PNG preview)"),
+                self._make_placeholder_bitmap((520, 360), "Bottom SVG saved (no PNG preview)"),
+            )
+
+        log(
+            f"[OK] Board images saved: {top_svg.name}, {bottom_svg.name}"
+            + (f" (PNG preview: {top_png.name}, {bottom_png.name})" if top_png.exists() else "")
+        )
+        finish()
 
     def on_toggle_log(self, event):
         """Open or focus a separate log window without resizing main layout."""
@@ -1030,7 +1915,7 @@ class MouserAutoOrderTab(wx.Panel):
             self.log("[ERROR] Keine .kicad_sch Datei im Projekt gefunden.")
             return
 
-        kicad_cli = shutil.which("kicad-cli")
+        kicad_cli = self._find_kicad_cli()
         if not kicad_cli:
             self.log("[ERROR] kicad-cli nicht gefunden. Bitte in PATH aufnehmen.")
             return
