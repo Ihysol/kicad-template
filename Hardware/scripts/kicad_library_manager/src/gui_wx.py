@@ -15,6 +15,9 @@ from sexpdata import Symbol, loads
 
 from gui_core import (
     APP_VERSION,
+    AUTO_BORDER_KEY,
+    BORDER_MARGIN_KEY,
+    RENDER_PRESET_KEY,
     USE_SYMBOLNAME_KEY,
     SHOW_LOG_KEY,
     export_symbols_with_checks,
@@ -259,6 +262,15 @@ def _find_kicad_cli_path() -> str | None:
     return None
 
 
+def _subprocess_no_window_kwargs() -> dict:
+    if os.name != "nt":
+        return {}
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = 0
+    return {"creationflags": subprocess.CREATE_NO_WINDOW, "startupinfo": startup}
+
+
 def _normalize_bom_headers_inplace(bom_path: str) -> None:
     try:
         with open(bom_path, newline="", encoding="utf-8") as f:
@@ -374,7 +386,7 @@ def _submit_order_worker(data_for_order: dict, queue) -> None:
 # ===============================
 class BoardPreviewPanel(wx.Panel):
     """Panel that draws a scaled bitmap and interactive crop rectangle overlay."""
-    def __init__(self, parent, on_crop_change=None, on_select=None):
+    def __init__(self, parent, on_crop_change=None, on_select=None, on_reset=None):
         super().__init__(parent, style=wx.BORDER_SIMPLE)
         self._bmp = None
         self._scaled = None
@@ -386,6 +398,7 @@ class BoardPreviewPanel(wx.Panel):
         self._crop_at_drag = None
         self._on_crop_change = on_crop_change
         self._on_select = on_select
+        self._on_reset = on_reset
         self._loading = False
         self._loading_text = "Rendering..."
         self.Bind(wx.EVT_PAINT, self._on_paint)
@@ -393,6 +406,7 @@ class BoardPreviewPanel(wx.Panel):
         self.Bind(wx.EVT_LEFT_DOWN, self._on_left_down)
         self.Bind(wx.EVT_LEFT_UP, self._on_left_up)
         self.Bind(wx.EVT_MOTION, self._on_mouse_move)
+        self.Bind(wx.EVT_RIGHT_UP, self._on_right_up)
 
     def set_bitmap(self, bmp: wx.Bitmap | None):
         self._bmp = bmp if (bmp and bmp.IsOk()) else None
@@ -499,6 +513,10 @@ class BoardPreviewPanel(wx.Panel):
         new_crop = self._compute_crop_from_drag(pos)
         if new_crop and self._on_crop_change:
             self._on_crop_change(new_crop)
+
+    def _on_right_up(self, event):
+        if self._on_reset:
+            self._on_reset()
 
     def _hit_test(self, pos) -> str | None:
         rect = self._image_rect
@@ -682,7 +700,7 @@ class MainFrame(wx.Frame):
         self.notebook.AddPage(self.tab_zip, "Import ZIP Archives")
         self.notebook.AddPage(self.tab_symbol, "Export Project Symbols")
         self.notebook.AddPage(self.tab_drc, "DRC Manager")
-        self.notebook.AddPage(self.tab_board, "Board Images")
+        self.notebook.AddPage(self.tab_board, "Generate Images from PCB")
         self.notebook.AddPage(self.tab_mouser, "Mouser Auto Order")
         vbox.Add(self.notebook, 1, wx.EXPAND | wx.ALL, 8)
 
@@ -720,12 +738,13 @@ class MainFrame(wx.Frame):
             self.tab_zip,
             style=dv.DV_ROW_LINES | dv.DV_VERT_RULES | dv.DV_SINGLE
         )
-        self.zip_file_list.AppendToggleColumn("", width=40)
-        self.zip_file_list.AppendTextColumn("Archive Name", width=300)
-        self.zip_file_list.AppendIconTextColumn("Status", width=250, align=wx.ALIGN_LEFT)
-        self.zip_file_list.AppendTextColumn("Delete", width=80, align=wx.ALIGN_CENTER)
+        self.zip_col_include = self.zip_file_list.AppendToggleColumn("Include", width=80)
+        self.zip_col_include.SetAlignment(wx.ALIGN_CENTER)
+        self.zip_col_name = self.zip_file_list.AppendTextColumn("Archive Name", width=300)
+        self.zip_col_status = self.zip_file_list.AppendIconTextColumn("Status", width=250, align=wx.ALIGN_LEFT)
+        self.zip_col_delete = self.zip_file_list.AppendTextColumn("Delete", width=80, align=wx.ALIGN_CENTER)
         self.zip_file_list.SetDropTarget(ZipFileDropTarget(self))
-        self.zip_file_list.Bind(dv.EVT_DATAVIEW_SELECTION_CHANGED, self.on_zip_row_clicked)
+        self.zip_file_list.Bind(dv.EVT_DATAVIEW_ITEM_VALUE_CHANGED, self.on_zip_checkbox_changed)
         self.zip_file_list.Bind(dv.EVT_DATAVIEW_ITEM_ACTIVATED, self.on_zip_delete_clicked)
         
         # dynamically resize columns to always fill 100%
@@ -769,7 +788,10 @@ class MainFrame(wx.Frame):
         h_sym_top.Add(self.chk_master_symbols, 0, wx.ALIGN_CENTER_VERTICAL)
         self.sym_vbox.Add(h_sym_top, 0, wx.BOTTOM, 5)
         
-        self.symbol_list = wx.CheckListBox(self.tab_symbol)
+        self.symbol_list = dv.DataViewListCtrl(self.tab_symbol, style=dv.DV_ROW_LINES | dv.DV_VERT_RULES)
+        self.sym_col_include = self.symbol_list.AppendToggleColumn("Include", width=80)
+        self.sym_col_include.SetAlignment(wx.ALIGN_CENTER)
+        self.sym_col_name = self.symbol_list.AppendTextColumn("Symbol", width=300)
         self.sym_vbox.Add(wx.StaticText(self.tab_symbol, label="Project Symbols:"), 0, wx.BOTTOM, 5)
         self.sym_vbox.Add(self.symbol_list, 1, wx.EXPAND | wx.BOTTOM, 5)
 
@@ -803,7 +825,7 @@ class MainFrame(wx.Frame):
         self.drc_vbox.Add(self.btn_drc, 0, wx.BOTTOM, 5)
         self.tab_drc.SetSizer(self.drc_vbox)
 
-        # --- Board Images tab content ---
+        # --- Generate Images from PCB tab content ---
         self.board_vbox = wx.BoxSizer(wx.VERTICAL)
 
         self.board_controls = wx.BoxSizer(wx.HORIZONTAL)
@@ -819,11 +841,13 @@ class MainFrame(wx.Frame):
         set_button_icon(self.btn_render_custom, wx.ART_EXECUTABLE_FILE)
         self.btn_save_board = wx.Button(self.tab_board, label="Save Previews")
         set_button_icon(self.btn_save_board, wx.ART_FILE_SAVE_AS)
+        self._board_has_images = False
         self.board_controls.Add(self.btn_generate_board, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
         self.board_controls.Add(self.btn_render_custom, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
         self.board_controls.Add(self.btn_save_board, 0, wx.ALIGN_CENTER_VERTICAL)
         self.board_vbox.Add(self.board_controls, 0, wx.EXPAND | wx.ALL, 8)
 
+        self.board_sizes_box = wx.StaticBoxSizer(wx.VERTICAL, self.tab_board, "Render Resolution")
         self.board_sizes = wx.FlexGridSizer(cols=4, vgap=4, hgap=8)
         self.board_sizes.AddGrowableCol(1, 0)
         self.board_sizes.AddGrowableCol(3, 0)
@@ -834,7 +858,7 @@ class MainFrame(wx.Frame):
         self.board_sizes.Add(wx.StaticText(self.tab_board, label="Height"), 0, wx.ALIGN_CENTER_VERTICAL)
         self.txt_render_h = wx.TextCtrl(self.tab_board, value="1440", size=(70, -1))
         self.board_sizes.Add(self.txt_render_h, 0, wx.ALIGN_CENTER_VERTICAL)
-        self.board_vbox.Add(self.board_sizes, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        self.board_sizes_box.Add(self.board_sizes, 0, wx.ALL, 6)
 
         self.preset_radio = wx.RadioBox(
             self.tab_board,
@@ -843,12 +867,62 @@ class MainFrame(wx.Frame):
             majorDimension=4,
             style=wx.RA_SPECIFY_COLS,
         )
-        self.preset_radio.SetSelection(1)  # 2K default
-        self.board_vbox.Add(self.preset_radio, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        cfg = load_config()
+        preset_idx = cfg.get(RENDER_PRESET_KEY, 1)
+        if not isinstance(preset_idx, int):
+            preset_idx = 1
+        preset_idx = max(0, min(preset_idx, self.preset_radio.GetCount() - 1))
+        self.preset_radio.SetSelection(preset_idx)
+        preset_values = {
+            0: (1920, 1080),
+            1: (2560, 1440),
+            2: (3840, 2160),
+            3: (7680, 4320),
+        }
+        if preset_idx in preset_values:
+            w, h = preset_values[preset_idx]
+            self._set_render_preset(w, h)
+
+        self.chk_auto_border = wx.CheckBox(
+            self.tab_board,
+            label="Use auto-border placement",
+        )
+        self.chk_auto_border.SetValue(cfg.get(AUTO_BORDER_KEY, True))
+        self.btn_border_margin_dec = wx.Button(self.tab_board, label="-10", size=(50, -1))
+        self.btn_border_margin_inc = wx.Button(self.tab_board, label="+10", size=(50, -1))
+        self.txt_border_margin = wx.TextCtrl(
+            self.tab_board,
+            value=str(cfg.get(BORDER_MARGIN_KEY, 20)),
+            size=(60, -1),
+            style=wx.TE_PROCESS_ENTER,
+        )
+
+        self.border_margin_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.border_margin_sizer.Add(
+            wx.StaticText(self.tab_board, label="Border margin (px)"),
+            0,
+            wx.ALIGN_CENTER_VERTICAL | wx.RIGHT,
+            8,
+        )
+        self.border_margin_sizer.Add(self.btn_border_margin_dec, 0, wx.RIGHT, 6)
+        self.border_margin_sizer.Add(self.txt_border_margin, 0, wx.RIGHT, 6)
+        self.border_margin_sizer.Add(self.btn_border_margin_inc, 0)
+
+        self.border_settings_box = wx.StaticBoxSizer(wx.VERTICAL, self.tab_board, "Border Settings")
+        self.border_settings_row = wx.BoxSizer(wx.HORIZONTAL)
+        self.border_settings_row.Add(self.chk_auto_border, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
+        self.border_settings_row.Add(self.border_margin_sizer, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.border_settings_box.Add(self.border_settings_row, 0, wx.ALL, 6)
+        self.board_sizes_row = wx.BoxSizer(wx.HORIZONTAL)
+        self.board_sizes_row.Add(self.board_sizes_box, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 12)
+        self.board_sizes_row.Add(self.preset_radio, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 12)
+        self.board_sizes_row.Add(self.border_settings_box, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.board_vbox.Add(self.board_sizes_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        wx.CallAfter(self._normalize_board_section_heights)
 
         self.lbl_crop_help = wx.StaticText(
             self.tab_board,
-            label="Tip: Drag the red box to move/resize the crop frame.",
+            label="Tip: Drag the red box to move/resize the crop frame. Right-click an image to auto-fit (or reset).",
         )
         self.lbl_crop_help.SetFont(wx.Font(wx.FontInfo().Bold().Italic()))
         self.lbl_crop_help.SetForegroundColour(wx.Colour(200, 80, 20))
@@ -859,11 +933,13 @@ class MainFrame(wx.Frame):
             self.tab_board,
             on_crop_change=self._set_crop,
             on_select=lambda: self._set_active_preview("top"),
+            on_reset=lambda: self._auto_crop_current_preview("top"),
         )
         self.board_image_panel_bottom = BoardPreviewPanel(
             self.tab_board,
             on_crop_change=self._set_crop,
             on_select=lambda: self._set_active_preview("bottom"),
+            on_reset=lambda: self._auto_crop_current_preview("bottom"),
         )
         self.board_image_label_top = wx.StaticText(self.board_image_panel_top, label="")
         self.board_image_label_top.SetBackgroundColour(wx.Colour(240, 240, 240))
@@ -880,6 +956,7 @@ class MainFrame(wx.Frame):
         self._set_crop((0, 100, 0, 100))
         self.active_side = "top"
         self._set_active_preview("top")
+        self._update_board_action_state()
         self.board_image_panel_top.Bind(wx.EVT_SIZE, self.on_board_image_resize)
         self.board_image_panel_bottom.Bind(wx.EVT_SIZE, self.on_board_image_resize)
 
@@ -935,7 +1012,7 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_BUTTON, lambda e: self.open_url("https://github.com/Ihysol/kicad-template"), self.btn_issues)
         self.Bind(wx.EVT_BUTTON, self.on_open_project, self.btn_open_project)
         self.Bind(wx.EVT_BUTTON, self.on_refresh_symbols, self.btn_refresh_symbols)
-        self.Bind(wx.EVT_CHECKLISTBOX, self.on_symbol_item_toggled, self.symbol_list)
+        self.symbol_list.Bind(dv.EVT_DATAVIEW_ITEM_VALUE_CHANGED, self.on_symbol_item_toggled)
         self.Bind(wx.EVT_CHECKBOX, self.on_use_symbol_name_toggled, self.chk_use_symbol_name)
         self.Bind(wx.EVT_CHECKBOX, self.on_toggle_show_log, self.chk_show_log)
         self.Bind(wx.EVT_BUTTON, self.on_delete_selected, self.btn_delete_selected)
@@ -951,20 +1028,24 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_BUTTON, self.on_drc_update, self.btn_drc)
         self.Bind(wx.EVT_BUTTON, self.on_refresh_zips, self.btn_refresh_zips)
         self.Bind(wx.EVT_CHECKBOX, self.on_master_zip_toggle, self.chk_master_zip)
-        self.zip_file_list.Bind(dv.EVT_DATAVIEW_ITEM_VALUE_CHANGED, self.on_zip_checkbox_changed)
         self.notebook.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self.on_tab_changed)
         self.Bind(wx.EVT_BUTTON, self.on_toggle_log, self.btn_toggle_log)
         self.Bind(wx.EVT_BUTTON, self.on_generate_board_images, self.btn_generate_board)
         self.Bind(wx.EVT_BUTTON, self.on_generate_custom_board_images, self.btn_render_custom)
         self.Bind(wx.EVT_BUTTON, self.on_save_board_images, self.btn_save_board)
         self.Bind(wx.EVT_RADIOBOX, self.on_preset_changed, self.preset_radio)
+        self.Bind(wx.EVT_CHECKBOX, self.on_auto_border_toggled, self.chk_auto_border)
+        self.Bind(wx.EVT_BUTTON, self.on_border_margin_dec, self.btn_border_margin_dec)
+        self.Bind(wx.EVT_BUTTON, self.on_border_margin_inc, self.btn_border_margin_inc)
+        self.Bind(wx.EVT_TEXT_ENTER, self.on_border_margin_commit, self.txt_border_margin)
+        self.txt_border_margin.Bind(wx.EVT_KILL_FOCUS, self.on_border_margin_commit)
 
     # ---------- Event handlers ----------
     def on_resize_zip_columns(self, event):
         """Keep ZIP list columns evenly split (33% each) when resized."""
         event.Skip()
         total_width = self.zip_file_list.GetClientSize().width
-        toggle_col_width = 40  # keep the first checkbox column fixed
+        toggle_col_width = 80  # keep the first checkbox column fixed
         usable_width = max(total_width - toggle_col_width, 0)
 
         # Split remaining width equally among the 3 visible columns
@@ -976,9 +1057,9 @@ class MainFrame(wx.Frame):
     
     def on_delete_selected(self, event):
         """Delete selected symbols (and linked footprints + 3D models)."""
-        lst = self.symbol_list
-        total = lst.GetCount()
-        selected = [lst.GetString(i) for i in range(total) if lst.IsChecked(i)]
+        model = self.symbol_list.GetStore()
+        total = model.GetCount()
+        selected = [model.GetValueByRow(i, 1) for i in range(total) if model.GetValueByRow(i, 0)]
 
         if not selected:
             self.append_log("[WARN] No symbols selected for deletion.")
@@ -999,7 +1080,7 @@ class MainFrame(wx.Frame):
 
     
     def on_zip_delete_clicked(self, event):
-        """Delete the ZIP file when clicking the Delete column."""
+        """Delete the ZIP file when double-clicking the Delete column."""
         item = event.GetItem()
         if not item.IsOk():
             return
@@ -1010,7 +1091,6 @@ class MainFrame(wx.Frame):
             return
 
         col = event.GetColumn()
-        # Delete column index: 3 (0=checkbox,1=name,2=status,3=delete)
         if col != 3:
             return
 
@@ -1018,7 +1098,6 @@ class MainFrame(wx.Frame):
             return
         zip_path = Path(self.zip_rows[row].get("path", ""))
 
-        # Confirm deletion
         dlg = wx.MessageDialog(
             self,
             f"Delete '{zip_path.name}' from the input folder?",
@@ -1037,28 +1116,7 @@ class MainFrame(wx.Frame):
             self.append_log(f"[ERROR] Could not delete {zip_path.name}: {e}")
             return
 
-        # Refresh list immediately
         self.refresh_zip_list()
-
-    
-    def on_zip_row_clicked(self, event):
-        """Toggle checkbox immediately when clicking any cell in the row."""
-        selections = self.zip_file_list.GetSelections()
-        if not selections:
-            return
-        model = self.zip_file_list.GetStore()
-        item = selections[0]
-        row = model.GetRow(item)
-        if row < 0:
-            return
-
-        # toggle value
-        current = model.GetValueByRow(row, 0)
-        model.SetValueByRow(not current, row, 0)
-        self.zip_file_list.Refresh()  # force visual update immediately
-
-        # update master checkbox status
-        self.on_zip_checkbox_changed(None)
     
     def on_use_symbol_name_toggled(self, event):
         """Save preference to backend config."""
@@ -1068,6 +1126,41 @@ class MainFrame(wx.Frame):
         save_config(cfg)
         state = "enabled" if value else "disabled"
         self.append_log(f"[INFO] 'Use symbol name as footprint/3D model' {state}.")
+
+    def on_auto_border_toggled(self, event):
+        """Persist auto-border setting for board image generation/reset."""
+        value = self.chk_auto_border.IsChecked()
+        cfg = load_config()
+        cfg[AUTO_BORDER_KEY] = value
+        save_config(cfg)
+        state = "enabled" if value else "disabled"
+        self.append_log(f"[INFO] Auto-border placement {state}.")
+
+    def _set_border_margin_value(self, value: int):
+        value = max(0, int(value))
+        self.txt_border_margin.ChangeValue(str(value))
+        cfg = load_config()
+        cfg[BORDER_MARGIN_KEY] = value
+        save_config(cfg)
+        if self.chk_auto_border.IsChecked() and getattr(self, "_board_has_images", False):
+            self._auto_crop_current_preview(self.active_side)
+
+    def _get_border_margin_value(self) -> int:
+        raw = self.txt_border_margin.GetValue().strip()
+        if not raw.isdigit():
+            return 0
+        return max(0, int(raw))
+
+    def on_border_margin_dec(self, event):
+        self._set_border_margin_value(self._get_border_margin_value() - 10)
+
+    def on_border_margin_inc(self, event):
+        self._set_border_margin_value(self._get_border_margin_value() + 10)
+
+    def on_border_margin_commit(self, event):
+        if self.txt_border_margin.IsModified():
+            self._set_border_margin_value(self._get_border_margin_value())
+        event.Skip()
         
     def open_url(self, url):
         import webbrowser
@@ -1103,9 +1196,9 @@ class MainFrame(wx.Frame):
 
 
     def on_symbol_item_toggled(self, event):
-        lst = self.symbol_list
-        total = lst.GetCount()
-        checked = sum(1 for i in range(total) if lst.IsChecked(i))
+        model = self.symbol_list.GetStore()
+        total = model.GetCount()
+        checked = sum(1 for i in range(total) if model.GetValueByRow(i, 0))
         all_checked = checked == total and total > 0
         self.chk_master_symbols.SetValue(all_checked)
         self.chk_master_symbols.SetLabel("Deselect All" if all_checked else "Select All")
@@ -1120,9 +1213,10 @@ class MainFrame(wx.Frame):
 
     def on_master_symbols_toggle(self, event):
         checked = self.chk_master_symbols.IsChecked()
-        lst = self.symbol_list
-        for i in range(lst.GetCount()):
-            lst.Check(i, checked)
+        model = self.symbol_list.GetStore()
+        for i in range(model.GetCount()):
+            model.SetValueByRow(checked, i, 0)
+        self.symbol_list.Refresh()
         self.chk_master_symbols.SetLabel("Deselect All" if checked else "Select All")
         if event:
             event.Skip()
@@ -1147,11 +1241,51 @@ class MainFrame(wx.Frame):
     def _set_board_busy(self, busy: bool):
         self._board_busy = busy
         self.btn_generate_board.Enable(not busy)
-        self.btn_render_custom.Enable(not busy)
-        self.btn_save_board.Enable(not busy)
+        self.btn_render_custom.Enable(not busy and self._board_has_images)
+        self.btn_save_board.Enable(not busy and self._board_has_images)
         self.preset_radio.Enable(not busy)
         self.txt_render_w.Enable(not busy)
         self.txt_render_h.Enable(not busy)
+
+    def _normalize_board_section_heights(self):
+        """Align heights of the board settings subsections."""
+        sections = [
+            self.board_sizes_box.GetStaticBox(),
+            self.preset_radio,
+            self.border_settings_box.GetStaticBox(),
+        ]
+        max_h = 0
+        for section in sections:
+            try:
+                _, h = section.GetBestSize()
+                max_h = max(max_h, h)
+            except Exception:
+                pass
+        if max_h <= 0:
+            return
+        max_h += 7
+        for section in sections:
+            try:
+                section.SetMinSize((-1, max_h))
+            except Exception:
+                pass
+        if hasattr(self, "board_sizes_row"):
+            self.board_sizes_row.Layout()
+        if hasattr(self, "board_vbox"):
+            self.board_vbox.Layout()
+
+
+    def _update_board_action_state(self):
+        if getattr(self, "_board_busy", False):
+            self.btn_render_custom.Enable(False)
+            self.btn_save_board.Enable(False)
+            return
+        self.btn_render_custom.Enable(self._board_has_images)
+        self.btn_save_board.Enable(self._board_has_images)
+
+    def _set_board_has_images(self, has_images: bool):
+        self._board_has_images = has_images
+        self._update_board_action_state()
 
     def _set_zip_busy(self, busy: bool):
         self._zip_busy = busy
@@ -1463,8 +1597,8 @@ class MainFrame(wx.Frame):
         elif "DRC" in tab_label:
             self.append_log("[INFO] DRC Manager ready.")
 
-        elif "Board Images" in tab_label:
-            self.append_log("[INFO] Board Images ready.")
+        elif "Generate Images from PCB" in tab_label:
+            self.append_log("[INFO] Generate Images from PCB ready.")
 
         elif "mouser" in tab_label.lower():
             self.append_log("[INFO] Mouser Auto Order ready.")
@@ -1543,11 +1677,24 @@ class MainFrame(wx.Frame):
         width, height = size
         bmp = wx.Bitmap(width, height)
         dc = wx.MemoryDC(bmp)
-        dc.SetBackground(wx.Brush(wx.Colour(235, 235, 235)))
-        dc.Clear()
-        dc.SetPen(wx.Pen(wx.Colour(200, 200, 200)))
+        bg = wx.Colour(180, 180, 180)
+        border = wx.Colour(140, 140, 140)
+        text_col = wx.Colour(30, 30, 30)
+        # Explicit fill to avoid platform defaults showing white.
+        dc.SetBrush(wx.Brush(bg))
+        dc.SetPen(wx.TRANSPARENT_PEN)
         dc.DrawRectangle(0, 0, width, height)
-        dc.SetTextForeground(wx.Colour(120, 120, 120))
+        dc.SetPen(wx.Pen(border))
+        dc.SetBrush(wx.TRANSPARENT_BRUSH)
+        dc.DrawRectangle(0, 0, width, height)
+        # Slight shadow + bold font for readability.
+        font = self.GetFont()
+        if font and font.IsOk():
+            font.SetWeight(wx.FONTWEIGHT_BOLD)
+            dc.SetFont(font)
+        dc.SetTextForeground(wx.Colour(230, 230, 230))
+        dc.DrawLabel(text, wx.Rect(0, 1, width, height), alignment=wx.ALIGN_CENTER)
+        dc.SetTextForeground(text_col)
         dc.DrawLabel(text, wx.Rect(0, 0, width, height), alignment=wx.ALIGN_CENTER)
         dc.SelectObject(wx.NullBitmap)
         return bmp
@@ -1619,12 +1766,18 @@ class MainFrame(wx.Frame):
         if idx in presets:
             w, h = presets[idx]
             self._set_render_preset(w, h)
+        cfg = load_config()
+        cfg[RENDER_PRESET_KEY] = idx
+        save_config(cfg)
 
     def _auto_crop_from_alpha(self, img: wx.Image, margin_px: int = 20) -> tuple[int, int, int, int] | None:
         """Return crop rectangle in percent based on non-transparent pixels."""
         if not img.HasAlpha():
             return None
         w, h = img.GetWidth(), img.GetHeight()
+        if w <= 0 or h <= 0:
+            return None
+        margin_px = max(0, min(int(margin_px), min(w, h) // 2))
         data = img.GetAlpha()
         if data is None:
             return None
@@ -1659,6 +1812,23 @@ class MainFrame(wx.Frame):
         if x1 <= x0 or y1 <= y0:
             return None
         return (x0, x1, y0, y1)
+
+    def _auto_crop_current_preview(self, side: str):
+        """Auto-fit the crop rectangle based on current preview image alpha."""
+        if not self.chk_auto_border.IsChecked():
+            self._set_crop((0, 100, 0, 100))
+            return
+        bmp = self.board_source_top if side == "top" else self.board_source_bottom
+        if not bmp or not bmp.IsOk():
+            self.append_log("[WARN] No preview image available to auto-fit.")
+            return
+        img = bmp.ConvertToImage()
+        crop = self._auto_crop_from_alpha(img, margin_px=self._get_border_margin_value())
+        if crop:
+            self._set_crop(crop)
+        else:
+            self.append_log("[WARN] Auto-fit requires an image with transparency. Resetting to full frame.")
+            self._set_crop((0, 100, 0, 100))
 
     def _parse_size_field(self, ctrl: wx.TextCtrl, label: str) -> int | None:
         raw = ctrl.GetValue().strip()
@@ -1874,8 +2044,8 @@ class MainFrame(wx.Frame):
         ]
 
         try:
-            res_top = subprocess.run(cmd_render_top, capture_output=True, text=True)
-            res_bottom = subprocess.run(cmd_render_bottom, capture_output=True, text=True)
+            res_top = subprocess.run(cmd_render_top, capture_output=True, text=True, **_subprocess_no_window_kwargs())
+            res_bottom = subprocess.run(cmd_render_bottom, capture_output=True, text=True, **_subprocess_no_window_kwargs())
         except Exception as e:
             log(f"[ERROR] kicad-cli call failed: {e}")
             finish()
@@ -1893,14 +2063,16 @@ class MainFrame(wx.Frame):
             try:
                 img_top = wx.Image(str(crop_top or top_png))
                 if not apply_crop:
-                    auto_crop = self._auto_crop_from_alpha(img_top, margin_px=20)
-                    if auto_crop:
-                        ui(self._set_crop, auto_crop)
+                    if self.chk_auto_border.IsChecked():
+                        auto_crop = self._auto_crop_from_alpha(img_top, margin_px=self._get_border_margin_value())
+                        if auto_crop:
+                            ui(self._set_crop, auto_crop)
                 ui(
                     self._load_and_set_board_images,
                     str(crop_top or top_png),
                     str(crop_bottom or bottom_png),
                 )
+                ui(self._set_board_has_images, True)
             except Exception as e:
                 log(f"[WARN] Could not load PNG preview: {e}")
             if apply_crop and (crop_top or crop_bottom):
@@ -1938,8 +2110,8 @@ class MainFrame(wx.Frame):
         ]
 
         try:
-            res_top = subprocess.run(cmd_top, capture_output=True, text=True)
-            res_bottom = subprocess.run(cmd_bottom, capture_output=True, text=True)
+            res_top = subprocess.run(cmd_top, capture_output=True, text=True, **_subprocess_no_window_kwargs())
+            res_bottom = subprocess.run(cmd_bottom, capture_output=True, text=True, **_subprocess_no_window_kwargs())
         except Exception as e:
             log(f"[ERROR] kicad-cli call failed: {e}")
             finish()
@@ -1962,14 +2134,44 @@ class MainFrame(wx.Frame):
             log("[INFO] Converting SVGs to PNG for preview...")
             try:
                 if mode == "magick":
-                    subprocess.run([converter, str(top_svg), str(top_png)], capture_output=True, text=True)
-                    subprocess.run([converter, str(bottom_svg), str(bottom_png)], capture_output=True, text=True)
+                    subprocess.run(
+                        [converter, str(top_svg), str(top_png)],
+                        capture_output=True,
+                        text=True,
+                        **_subprocess_no_window_kwargs(),
+                    )
+                    subprocess.run(
+                        [converter, str(bottom_svg), str(bottom_png)],
+                        capture_output=True,
+                        text=True,
+                        **_subprocess_no_window_kwargs(),
+                    )
                 elif mode == "rsvg":
-                    subprocess.run([converter, str(top_svg), "-o", str(top_png)], capture_output=True, text=True)
-                    subprocess.run([converter, str(bottom_svg), "-o", str(bottom_png)], capture_output=True, text=True)
+                    subprocess.run(
+                        [converter, str(top_svg), "-o", str(top_png)],
+                        capture_output=True,
+                        text=True,
+                        **_subprocess_no_window_kwargs(),
+                    )
+                    subprocess.run(
+                        [converter, str(bottom_svg), "-o", str(bottom_png)],
+                        capture_output=True,
+                        text=True,
+                        **_subprocess_no_window_kwargs(),
+                    )
                 elif mode == "inkscape":
-                    subprocess.run([converter, str(top_svg), "--export-type=png", f"--export-filename={top_png}"], capture_output=True, text=True)
-                    subprocess.run([converter, str(bottom_svg), "--export-type=png", f"--export-filename={bottom_png}"], capture_output=True, text=True)
+                    subprocess.run(
+                        [converter, str(top_svg), "--export-type=png", f"--export-filename={top_png}"],
+                        capture_output=True,
+                        text=True,
+                        **_subprocess_no_window_kwargs(),
+                    )
+                    subprocess.run(
+                        [converter, str(bottom_svg), "--export-type=png", f"--export-filename={bottom_png}"],
+                        capture_output=True,
+                        text=True,
+                        **_subprocess_no_window_kwargs(),
+                    )
             except Exception as e:
                 log(f"[WARN] SVG conversion failed: {e}")
 
@@ -1988,6 +2190,7 @@ class MainFrame(wx.Frame):
                     str(crop_top or top_png),
                     str(crop_bottom or bottom_png),
                 )
+                ui(self._set_board_has_images, True)
             except Exception as e:
                 log(f"[WARN] Could not load PNG preview: {e}")
         else:
@@ -2080,6 +2283,12 @@ class MainFrame(wx.Frame):
         dc.SelectObject(wx.NullBitmap)
         return bmp
 
+    def _make_delete_icon(self, size=16):
+        bmp = wx.ArtProvider.GetBitmap(wx.ART_DELETE, wx.ART_MENU, (size, size))
+        if bmp and bmp.IsOk():
+            return bmp
+        return self._make_status_icon(wx.Colour(220, 50, 50), size=min(size, 12))
+
     def refresh_zip_list(self, rows=None):
         """Scan current folder and rebuild ZIP DataView list."""
         self.current_folder.mkdir(parents=True, exist_ok=True)
@@ -2099,14 +2308,18 @@ class MainFrame(wx.Frame):
             "ERROR": (wx.Colour(255, 80, 80), "ERROR"),
             "NONE": (wx.Colour(180, 180, 180), "MISSING"),
         }
-
         for row in self.zip_rows:
             raw_status = row.get("status", "")
             colour, text = status_styles.get(raw_status, (wx.Colour(180, 180, 180), raw_status or "-"))
             is_disabled = raw_status in ("MISSING_SYMBOL", "MISSING_FOOTPRINT")
             icontext = wx.dataview.DataViewIconText(f" {text}", self._make_status_icon(colour))
             model.AppendItem(
-                [not is_disabled and raw_status != "PARTIAL", row.get("name", "unknown.zip"), icontext, "double-click to delete"]
+                [
+                    not is_disabled and raw_status != "PARTIAL",
+                    row.get("name", "unknown.zip"),
+                    icontext,
+                    "double-click to delete",
+                ]
             )
 
         self.chk_master_zip.SetValue(False)
@@ -2116,15 +2329,15 @@ class MainFrame(wx.Frame):
     def refresh_symbol_list(self, symbols=None):
         if symbols is None:
             symbols = list_project_symbols()
-        self.symbol_list.Clear()
+        self.symbol_list.GetStore().DeleteAllItems()
         for sym in symbols:
-            self.symbol_list.Append(sym)
+            self.symbol_list.GetStore().AppendItem([False, sym])
         self.chk_master_symbols.SetValue(False)
         self.chk_master_symbols.SetLabel("Select All")
 
     def collect_selected_symbols_for_export(self):
-        lst = self.symbol_list
-        return [lst.GetString(i) for i in range(lst.GetCount()) if lst.IsChecked(i)]
+        model = self.symbol_list.GetStore()
+        return [model.GetValueByRow(i, 1) for i in range(model.GetCount()) if model.GetValueByRow(i, 0)]
 
     def _get_selected_zip_paths(self) -> list[Path]:
         model = self.zip_file_list.GetStore()
@@ -2259,6 +2472,7 @@ class MouserAutoOrderTab(wx.Panel):
         # ---------- DataView for BOM rows ----------
         self.dv = dv.DataViewListCtrl(self, style=dv.DV_ROW_LINES | dv.DV_VERT_RULES)
         self.col_exclude = self.dv.AppendToggleColumn("Include", width=80) # Checkbox to include items
+        self.col_exclude.SetAlignment(wx.ALIGN_CENTER)
         self.col_ref     = self.dv.AppendTextColumn("Reference", width=250)
         self.col_mnr     = self.dv.AppendTextColumn("Mouser Number", width=200)
         self.col_qty     = self.dv.AppendTextColumn("Qty", width=80)

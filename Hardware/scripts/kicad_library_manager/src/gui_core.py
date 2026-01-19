@@ -57,7 +57,7 @@ except ImportError:  # pragma: no cover - fallback for isolated editing
 # Logging
 # =========================
 logger = logging.getLogger("kicad_library_manager")
-APP_VERSION = "v1.1"
+APP_VERSION = "v1.2"
 
 
 def ensure_logger(handler: logging.Handler | None = None, level: int = logging.INFO) -> None:
@@ -79,6 +79,9 @@ else:
 RENAME_ASSETS_KEY = "rename_assets_default"
 USE_SYMBOLNAME_KEY = "use_symbol_name_as_ref"
 SHOW_LOG_KEY = "show_log"
+AUTO_BORDER_KEY = "auto_border_on_generate"
+BORDER_MARGIN_KEY = "auto_border_margin_px"
+RENDER_PRESET_KEY = "render_preset_idx"
 
 
 def load_config() -> Dict[str, Any]:
@@ -91,6 +94,9 @@ def load_config() -> Dict[str, Any]:
     cfg.setdefault(RENAME_ASSETS_KEY, False)
     cfg.setdefault(USE_SYMBOLNAME_KEY, False)
     cfg.setdefault(SHOW_LOG_KEY, True)
+    cfg.setdefault(AUTO_BORDER_KEY, True)
+    cfg.setdefault(BORDER_MARGIN_KEY, 20)
+    cfg.setdefault(RENDER_PRESET_KEY, 1)
     return cfg
 
 
