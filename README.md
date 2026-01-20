@@ -2,7 +2,9 @@
 
 <!-- Keep this line! Rendered picture of PCB will be displayed after production files are pushed to branch -->
 
-![](Docs/board_preview.png)
+![](Docs/img/board_preview_top.png)
+![](Docs/img/board_preview_bottom.png)
+
 
 This template provides a clean KiCad repository structure for embedded hardware projects, including a GUI-based import script (`kicad_library_manager`) for component management.
 

@@ -1,17 +1,17 @@
 # ----------------------------------------------------------------------
-# JLCPCB Custom Design Rules (DRC) for KiCAD --- 1–2 Layer Version
+# JLCPCB Custom Design Rules (DRC) for KiCAD --- ≥ 4 Layer Version
 # ----------------------------------------------------------------------
 (version 1)
 
 # --- Drill / Hole Size ------------------------------------------------
 
 (rule "Drill Hole Size"
-  (constraint hole_size (min 0.3mm) (max 6.3mm))
+  (constraint hole_size (min 0.20mm) (max 6.3mm))
 )
 
 (rule "Via Hole Size"
   (condition "A.Type == 'Via'")
-  (constraint hole_size (min 0.3mm))
+  (constraint hole_size (min 0.20mm))
 )
 
 (rule "Via Annular Ring"
@@ -49,6 +49,7 @@
   (condition "(A.Type == 'Via' && A.Hole < 0.3mm && A.Diameter <= 0.4mm) || (A.Type == 'Pad' && ((A.Hole_Size_X < 0.3mm && A.Size_X <= 0.4mm) || (A.Hole_Size_Y < 0.3mm && A.Size_Y <= 0.4mm)))")
   (constraint annular_width (min 0.125mm))
 )
+
 
 # --- Clearance --------------------------------------------------------
 
@@ -99,22 +100,36 @@
 
 (rule "Pad to Trace (Different Nets)"
   (condition "A.Type == 'Pad' && (A.Pad_Type == 'Through-hole' || A.Pad_Type == 'NPTH, mechanical') && B.Type == 'Track' && A.Net != B.Net")
-  (constraint clearance (min 0.15mm))
+  (constraint clearance (min 0.20mm))
 )
+
 
 # --- Trace Width & Spacing --------------------------------------------
 
 (rule "Trace Width (Outer Layer)"
   (layer outer)
   (condition "A.Type == 'Track'")
-  (constraint track_width (min 0.15mm))
+  (constraint track_width (min 0.10mm))
 )
 
 (rule "Trace Spacing (Outer Layer)"
   (layer outer)
   (condition "A.Type == 'Track' && B.Type == 'Track'")
-  (constraint clearance (min 0.15mm))
+  (constraint clearance (min 0.10mm))
 )
+
+(rule "Trace Width (Inner Layer)"
+  (layer inner)
+  (condition "A.Type == 'Track'")
+  (constraint track_width (min 0.10mm))
+)
+
+(rule "Trace Spacing (Inner Layer)"
+  (layer inner)
+  (condition "A.Type == 'Track' && B.Type == 'Track'")
+  (constraint clearance (min 0.10mm))
+)
+
 
 # --- Silkscreen & Soldermask ------------------------------------------
 
@@ -134,6 +149,7 @@
   (condition "A.Type == 'Pad' && ((A.existsOnLayer('F.Mask') && B.Layer == 'F.Silkscreen') || (A.existsOnLayer('B.Mask') && B.Layer == 'B.Silkscreen'))")
   (constraint silk_clearance (min 0.15mm))
 )
+
 
 # --- Board Outline & Panelize ------------------------------------
 

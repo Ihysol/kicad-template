@@ -159,9 +159,10 @@ class BOMHandler:
     Handles BOM file reading, parsing, and preprocessing.
     Summarizes reference designators for easier display.
     """
-    def __init__(self, target_headers=None, working_dir=None):
+    def __init__(self, target_headers=None, working_dir=None, group_by_field=None):
         self.target_headers = [] if target_headers is None else target_headers
         self.m_dir_path = working_dir or os.getcwd()
+        self.group_by_field = group_by_field
         self.BOM_files = []
         self.data_array = {}
 
@@ -196,7 +197,14 @@ class BOMHandler:
         ranges.append(start if start == end else f"{start}-{end}")
         return ", ".join(ranges)
 
-    def process_bom_file(self, bom_file):
+    @staticmethod
+    def split_refs(raw):
+        """Split reference strings by commas (with or without spaces)."""
+        if not raw or raw == "/":
+            return []
+        return [p.strip() for p in str(raw).split(",") if p.strip()]
+
+    def process_bom_file(self, bom_file, group_by_field=None):
         """
         Read a BOM CSV file, validate required columns, and convert into internal data array.
         Reference column is summarized and truncated for display.
@@ -219,23 +227,87 @@ class BOMHandler:
                     return {}
 
                 self.target_headers = headers
-                # Initialize data arrays
-                self.data_array = {h: [] for h in headers}
-
+                rows = []
                 for row in reader:
+                    normalized = {}
                     for h in headers:
                         val = row.get(h, "")
                         if val is None or str(val).strip() == "":
                             val = "/"
-                        self.data_array[h].append(str(val).strip())
+                        normalized[h] = str(val).strip()
+                    rows.append(normalized)
         except Exception as e:
             print(f"{ICON_FAIL}  Could not read CSV: {e}")
             return {}
 
+        # Group rows by selected field (default: Value) and merge references/quantities.
+        resolved_group = group_by_field if group_by_field is not None else self.group_by_field
+        if resolved_group is None:
+            resolved_group = "Value"
+        if resolved_group in ("", "None", "(none)") or resolved_group not in headers:
+            resolved_group = None
+
+        if resolved_group:
+            grouped = {}
+            for row in rows:
+                group_key = row.get(resolved_group, "/")
+                if group_key not in grouped:
+                    grouped[group_key] = []
+                grouped[group_key].append(row)
+
+            def _ref_sort_key(ref):
+                prefix = ""
+                digits = ""
+                for ch in ref:
+                    if ch.isdigit():
+                        digits += ch
+                    else:
+                        if digits:
+                            break
+                        prefix += ch
+                num = int(digits) if digits.isdigit() else 0
+                return (prefix, num, ref)
+
+            merged_rows = []
+            for group_key, group_rows in grouped.items():
+                if len(group_rows) == 1:
+                    merged_rows.append(group_rows[0])
+                    continue
+                new_row = {}
+                # Merge references
+                all_refs = []
+                for gr in group_rows:
+                    all_refs.extend(self.split_refs(gr.get(CSV_REFERENCE_COLUMN_NAME, "")))
+                all_refs = sorted(set(all_refs), key=_ref_sort_key)
+                new_row[CSV_REFERENCE_COLUMN_NAME] = ", ".join(all_refs) if all_refs else "/"
+                # Merge quantities
+                total_qty = 0
+                for gr in group_rows:
+                    try:
+                        total_qty += int(gr.get(CSV_QUANTITY_COLUMN_NAME, "0"))
+                    except Exception:
+                        pass
+                new_row[CSV_QUANTITY_COLUMN_NAME] = str(total_qty) if total_qty > 0 else "0"
+                # Preserve other columns (use first non-empty value)
+                for h in headers:
+                    if h in (CSV_REFERENCE_COLUMN_NAME, CSV_QUANTITY_COLUMN_NAME):
+                        continue
+                    val = next((r.get(h, "/") for r in group_rows if r.get(h, "/") not in ("", "/")), "/")
+                    new_row[h] = val
+                new_row[resolved_group] = group_key
+                merged_rows.append(new_row)
+            rows = merged_rows
+
+        # Initialize data arrays from (possibly grouped) rows
+        self.data_array = {h: [] for h in headers}
+        for row in rows:
+            for h in headers:
+                self.data_array[h].append(row.get(h, "/"))
+
         # Summarize Reference column
         new_refs = []
         for r in self.data_array.get("Reference", []):
-            items = str(r).split(", ")
+            items = self.split_refs(r)
             if items and items[0] != "":
                 summarized = self.summerize_sorted_items(items)
                 new_refs.append(summarized[:MAX_REFERENCE_DISPLAY_LENGTH])

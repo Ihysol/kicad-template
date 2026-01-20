@@ -57,7 +57,7 @@ except ImportError:  # pragma: no cover - fallback for isolated editing
 # Logging
 # =========================
 logger = logging.getLogger("kicad_library_manager")
-APP_VERSION = "v1.2"
+APP_VERSION = "v1.2a"
 
 
 def ensure_logger(handler: logging.Handler | None = None, level: int = logging.INFO) -> None:
