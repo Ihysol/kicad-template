@@ -320,7 +320,7 @@ def _generate_bom_worker(schematic_path: str, bom_path: str, queue) -> None:
             labels,
             "--exclude-dnp",
         ]
-        res = subprocess.run(cmd, capture_output=True, text=True)
+        res = subprocess.run(cmd, capture_output=True, text=True, **_subprocess_no_window_kwargs())
         if res.returncode != 0:
             err = res.stderr.strip() or res.stdout.strip() or "Unbekannter Fehler"
             queue.put(("error", f"BOM-Export fehlgeschlagen: {err}"))
@@ -401,6 +401,7 @@ class BoardPreviewPanel(wx.Panel):
         self._on_reset = on_reset
         self._loading = False
         self._loading_text = "Rendering..."
+        self._loading_progress = None
         self.Bind(wx.EVT_PAINT, self._on_paint)
         self.Bind(wx.EVT_SIZE, self._on_resize)
         self.Bind(wx.EVT_LEFT_DOWN, self._on_left_down)
@@ -420,10 +421,14 @@ class BoardPreviewPanel(wx.Panel):
     def get_crop(self) -> tuple[int, int, int, int]:
         return self._crop
 
-    def set_loading(self, loading: bool, text: str | None = None):
+    def set_loading(self, loading: bool, text: str | None = None, progress: int | None = None):
         self._loading = loading
         if text:
             self._loading_text = text
+        if progress is not None:
+            self._loading_progress = max(0, min(100, int(progress)))
+        if not loading:
+            self._loading_progress = None
         self.Refresh()
 
     def _on_resize(self, event):
@@ -481,6 +486,18 @@ class BoardPreviewPanel(wx.Panel):
             dc.DrawRectangle(0, 0, panel_size.width, panel_size.height)
             dc.SetTextForeground(wx.Colour(255, 255, 255))
             dc.DrawLabel(self._loading_text, wx.Rect(0, 0, panel_size.width, panel_size.height), alignment=wx.ALIGN_CENTER)
+            if self._loading_progress is not None:
+                bar_w = max(panel_size.width // 2, 120)
+                bar_h = 10
+                x = (panel_size.width - bar_w) // 2
+                y = (panel_size.height // 2) + 18
+                dc.SetBrush(wx.Brush(wx.Colour(255, 255, 255, 80)))
+                dc.SetPen(wx.Pen(wx.Colour(255, 255, 255, 120)))
+                dc.DrawRectangle(x, y, bar_w, bar_h)
+                fill_w = int(bar_w * self._loading_progress / 100)
+                dc.SetBrush(wx.Brush(wx.Colour(80, 200, 120, 200)))
+                dc.SetPen(wx.TRANSPARENT_PEN)
+                dc.DrawRectangle(x, y, fill_w, bar_h)
 
     def _on_left_down(self, event):
         if not self._image_rect:
@@ -853,17 +870,17 @@ class MainFrame(wx.Frame):
         self.board_sizes.AddGrowableCol(3, 0)
 
         self.board_sizes.Add(wx.StaticText(self.tab_board, label="Width"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.txt_render_w = wx.TextCtrl(self.tab_board, value="2560", size=(70, -1))
+        self.txt_render_w = wx.TextCtrl(self.tab_board, value="1920", size=(70, -1))
         self.board_sizes.Add(self.txt_render_w, 0, wx.ALIGN_CENTER_VERTICAL)
         self.board_sizes.Add(wx.StaticText(self.tab_board, label="Height"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.txt_render_h = wx.TextCtrl(self.tab_board, value="1440", size=(70, -1))
+        self.txt_render_h = wx.TextCtrl(self.tab_board, value="1080", size=(70, -1))
         self.board_sizes.Add(self.txt_render_h, 0, wx.ALIGN_CENTER_VERTICAL)
         self.board_sizes_box.Add(self.board_sizes, 0, wx.ALL, 6)
 
         self.preset_radio = wx.RadioBox(
             self.tab_board,
             label="Resolution Preset",
-            choices=["1080p", "2K", "4K", "8K"],
+            choices=["720p", "1080p", "2K", "4K"],
             majorDimension=4,
             style=wx.RA_SPECIFY_COLS,
         )
@@ -874,10 +891,10 @@ class MainFrame(wx.Frame):
         preset_idx = max(0, min(preset_idx, self.preset_radio.GetCount() - 1))
         self.preset_radio.SetSelection(preset_idx)
         preset_values = {
-            0: (1920, 1080),
-            1: (2560, 1440),
-            2: (3840, 2160),
-            3: (7680, 4320),
+            0: (1280, 720),
+            1: (1920, 1080),
+            2: (2560, 1440),
+            3: (3840, 2160),
         }
         if preset_idx in preset_values:
             w, h = preset_values[preset_idx]
@@ -1758,10 +1775,10 @@ class MainFrame(wx.Frame):
     def on_preset_changed(self, event):
         idx = self.preset_radio.GetSelection()
         presets = {
-            0: (1920, 1080),
-            1: (2560, 1440),
-            2: (3840, 2160),
-            3: (7680, 4320),
+            0: (1280, 720),
+            1: (1920, 1080),
+            2: (2560, 1440),
+            3: (3840, 2160),
         }
         if idx in presets:
             w, h = presets[idx]
@@ -1856,8 +1873,8 @@ class MainFrame(wx.Frame):
                 wx.CallAfter(self._set_board_busy, False)
                 return
 
-            wx.CallAfter(self.board_image_panel_top.set_loading, True, "Cropping...")
-            wx.CallAfter(self.board_image_panel_bottom.set_loading, True, "Cropping...")
+            wx.CallAfter(self.board_image_panel_top.set_loading, True, "Cropping...", 0)
+            wx.CallAfter(self.board_image_panel_bottom.set_loading, True, "Cropping...", 0)
 
             top_path = Path(top)
             bottom_path = Path(bottom)
@@ -1880,6 +1897,8 @@ class MainFrame(wx.Frame):
                 return
 
             wx.CallAfter(self._load_and_set_board_images, str(cropped_top), str(cropped_bottom))
+            wx.CallAfter(self.board_image_panel_top.set_loading, True, "Cropping...", 100)
+            wx.CallAfter(self.board_image_panel_bottom.set_loading, True, "Cropping...", 100)
             wx.CallAfter(self.board_image_panel_top.set_loading, False)
             wx.CallAfter(self.board_image_panel_bottom.set_loading, False)
             log("[OK] Cropped previews updated.")
@@ -2002,8 +2021,13 @@ class MainFrame(wx.Frame):
         bottom_png = output_dir / f"{pcb.stem}_bottom.png"
 
         log(f"[INFO] Exporting board images from {pcb.name} ...")
-        ui(self.board_image_panel_top.set_loading, True, "Rendering...")
-        ui(self.board_image_panel_bottom.set_loading, True, "Rendering...")
+
+        def set_status(side: str, text: str, progress: int):
+            panel = self.board_image_panel_top if side == "top" else self.board_image_panel_bottom
+            ui(panel.set_loading, True, text, progress)
+
+        set_status("top", "Preparing...", 2)
+        set_status("bottom", "Preparing...", 2)
 
         # Prefer direct render (PNG). Fallback to SVG export if render is unavailable.
         cmd_render_top = [
@@ -2043,13 +2067,34 @@ class MainFrame(wx.Frame):
             str(pcb),
         ]
 
-        try:
-            res_top = subprocess.run(cmd_render_top, capture_output=True, text=True, **_subprocess_no_window_kwargs())
-            res_bottom = subprocess.run(cmd_render_bottom, capture_output=True, text=True, **_subprocess_no_window_kwargs())
-        except Exception as e:
-            log(f"[ERROR] kicad-cli call failed: {e}")
+        results = {}
+
+        def run_render(side: str, cmd):
+            try:
+                set_status(side, f"Preparing {side} render...", 10)
+                set_status(side, f"Starting {side} render...", 20)
+                res = subprocess.run(cmd, capture_output=True, text=True, **_subprocess_no_window_kwargs())
+                results[side] = res
+                set_status(side, f"Finishing {side} render...", 60)
+            except Exception as e:
+                results[side] = e
+
+        t_top = threading.Thread(target=run_render, args=("top", cmd_render_top))
+        t_bottom = threading.Thread(target=run_render, args=("bottom", cmd_render_bottom))
+        t_top.start()
+        t_bottom.start()
+        t_top.join()
+        t_bottom.join()
+
+        res_top = results.get("top")
+        res_bottom = results.get("bottom")
+        if isinstance(res_top, Exception) or isinstance(res_bottom, Exception):
+            err = res_top if isinstance(res_top, Exception) else res_bottom
+            log(f"[ERROR] kicad-cli call failed: {err}")
             finish()
             return
+        set_status("top", "Post-processing...", 75)
+        set_status("bottom", "Post-processing...", 75)
 
         if res_top.returncode == 0 and res_bottom.returncode == 0 and top_png.exists():
             self.base_top_image_path = str(top_png)
@@ -2072,6 +2117,8 @@ class MainFrame(wx.Frame):
                     str(crop_top or top_png),
                     str(crop_bottom or bottom_png),
                 )
+                set_status("top", "Loading preview...", 95)
+                set_status("bottom", "Loading preview...", 95)
                 ui(self._set_board_has_images, True)
             except Exception as e:
                 log(f"[WARN] Could not load PNG preview: {e}")
@@ -2085,6 +2132,8 @@ class MainFrame(wx.Frame):
         render_err = (res_top.stderr or res_top.stdout or "").strip()
         if render_err:
             log(f"[WARN] Render failed, falling back to SVG export: {render_err}")
+            set_status("top", "Preparing SVG export...", 15)
+            set_status("bottom", "Preparing SVG export...", 15)
 
         cmd_top = [
             kicad_cli,
@@ -2109,13 +2158,33 @@ class MainFrame(wx.Frame):
             "B.Cu,B.SilkS,Edge.Cuts",
         ]
 
-        try:
-            res_top = subprocess.run(cmd_top, capture_output=True, text=True, **_subprocess_no_window_kwargs())
-            res_bottom = subprocess.run(cmd_bottom, capture_output=True, text=True, **_subprocess_no_window_kwargs())
-        except Exception as e:
-            log(f"[ERROR] kicad-cli call failed: {e}")
+        svg_results = {}
+
+        def run_svg_export(side: str, cmd):
+            try:
+                set_status(side, "Starting SVG export...", 25)
+                res = subprocess.run(cmd, capture_output=True, text=True, **_subprocess_no_window_kwargs())
+                svg_results[side] = res
+                set_status(side, "Finishing SVG export...", 55)
+            except Exception as e:
+                svg_results[side] = e
+
+        t_svg_top = threading.Thread(target=run_svg_export, args=("top", cmd_top))
+        t_svg_bottom = threading.Thread(target=run_svg_export, args=("bottom", cmd_bottom))
+        t_svg_top.start()
+        t_svg_bottom.start()
+        t_svg_top.join()
+        t_svg_bottom.join()
+
+        res_top = svg_results.get("top")
+        res_bottom = svg_results.get("bottom")
+        if isinstance(res_top, Exception) or isinstance(res_bottom, Exception):
+            err = res_top if isinstance(res_top, Exception) else res_bottom
+            log(f"[ERROR] kicad-cli call failed: {err}")
             finish()
             return
+        set_status("top", "SVG export done...", 70)
+        set_status("bottom", "SVG export done...", 70)
 
         if res_top.returncode != 0:
             err = res_top.stderr.strip() or res_top.stdout.strip() or "Unknown error"
@@ -2132,48 +2201,43 @@ class MainFrame(wx.Frame):
         converter, mode = self._find_svg_converter()
         if converter and top_svg.exists() and bottom_svg.exists():
             log("[INFO] Converting SVGs to PNG for preview...")
+            set_status("top", "Preparing conversion...", 75)
+            set_status("bottom", "Preparing conversion...", 75)
             try:
-                if mode == "magick":
-                    subprocess.run(
-                        [converter, str(top_svg), str(top_png)],
-                        capture_output=True,
-                        text=True,
-                        **_subprocess_no_window_kwargs(),
-                    )
-                    subprocess.run(
-                        [converter, str(bottom_svg), str(bottom_png)],
-                        capture_output=True,
-                        text=True,
-                        **_subprocess_no_window_kwargs(),
-                    )
-                elif mode == "rsvg":
-                    subprocess.run(
-                        [converter, str(top_svg), "-o", str(top_png)],
-                        capture_output=True,
-                        text=True,
-                        **_subprocess_no_window_kwargs(),
-                    )
-                    subprocess.run(
-                        [converter, str(bottom_svg), "-o", str(bottom_png)],
-                        capture_output=True,
-                        text=True,
-                        **_subprocess_no_window_kwargs(),
-                    )
-                elif mode == "inkscape":
-                    subprocess.run(
-                        [converter, str(top_svg), "--export-type=png", f"--export-filename={top_png}"],
-                        capture_output=True,
-                        text=True,
-                        **_subprocess_no_window_kwargs(),
-                    )
-                    subprocess.run(
-                        [converter, str(bottom_svg), "--export-type=png", f"--export-filename={bottom_png}"],
-                        capture_output=True,
-                        text=True,
-                        **_subprocess_no_window_kwargs(),
-                    )
+                def run_convert(side: str, src_svg: Path, dst_png: Path):
+                    set_status(side, "Converting...", 85)
+                    if mode == "magick":
+                        subprocess.run(
+                            [converter, str(src_svg), str(dst_png)],
+                            capture_output=True,
+                            text=True,
+                            **_subprocess_no_window_kwargs(),
+                        )
+                    elif mode == "rsvg":
+                        subprocess.run(
+                            [converter, str(src_svg), "-o", str(dst_png)],
+                            capture_output=True,
+                            text=True,
+                            **_subprocess_no_window_kwargs(),
+                        )
+                    elif mode == "inkscape":
+                        subprocess.run(
+                            [converter, str(src_svg), "--export-type=png", f"--export-filename={dst_png}"],
+                            capture_output=True,
+                            text=True,
+                            **_subprocess_no_window_kwargs(),
+                        )
+
+                t_conv_top = threading.Thread(target=run_convert, args=("top", top_svg, top_png))
+                t_conv_bottom = threading.Thread(target=run_convert, args=("bottom", bottom_svg, bottom_png))
+                t_conv_top.start()
+                t_conv_bottom.start()
+                t_conv_top.join()
+                t_conv_bottom.join()
             except Exception as e:
                 log(f"[WARN] SVG conversion failed: {e}")
+            set_status("top", "Finishing conversion...", 92)
+            set_status("bottom", "Finishing conversion...", 92)
 
         if top_png.exists():
             self.base_top_image_path = str(top_png)
@@ -2190,6 +2254,8 @@ class MainFrame(wx.Frame):
                     str(crop_top or top_png),
                     str(crop_bottom or bottom_png),
                 )
+                set_status("top", "Loading preview...", 98)
+                set_status("bottom", "Loading preview...", 98)
                 ui(self._set_board_has_images, True)
             except Exception as e:
                 log(f"[WARN] Could not load PNG preview: {e}")
@@ -2199,6 +2265,8 @@ class MainFrame(wx.Frame):
                 self._make_placeholder_bitmap((520, 360), "Top SVG saved (no PNG preview)"),
                 self._make_placeholder_bitmap((520, 360), "Bottom SVG saved (no PNG preview)"),
             )
+            set_status("top", "Loading preview...", 98)
+            set_status("bottom", "Loading preview...", 98)
 
         log(
             f"[OK] Board images saved: {top_svg.name}, {bottom_svg.name}"
@@ -2781,7 +2849,10 @@ class MouserAutoOrderTab(wx.Panel):
                 self._enforce_final_qty_selection(row)
                 self._update_extra_qty_style(row)
 
-            self.log(f"[OK] Loaded {len(refs)} BOM rows.")
+            if len(refs) == 0:
+                self.log("[WARN] BOM contains no parts.")
+            else:
+                self.log(f"[OK] Loaded {len(refs)} BOM rows.")
             self._update_master_mouser_state()
         except Exception as e:
             self.log(f"[ERROR] Failed to apply BOM data: {e}")
