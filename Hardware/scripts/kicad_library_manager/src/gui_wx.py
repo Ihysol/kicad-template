@@ -332,11 +332,11 @@ def _generate_bom_worker(schematic_path: str, bom_path: str, queue) -> None:
         queue.put(("error", str(e)))
 
 
-def _parse_bom_worker(bom_path: str, queue) -> None:
+def _parse_bom_worker(bom_path: str, group_by_field: str | None, queue) -> None:
     try:
         from mouser_integration import BOMHandler
         handler = BOMHandler()
-        data = handler.process_bom_file(bom_path)
+        data = handler.process_bom_file(bom_path, group_by_field=group_by_field)
         queue.put(("ok", data))
     except Exception as e:
         queue.put(("error", str(e)))
@@ -2404,6 +2404,9 @@ class MouserAutoOrderTab(wx.Panel):
         self.order_client = self.mouser.MouserOrderClient() # Mouser order API client
         self.current_bom_file = None
         self.current_data_array = None
+        self._final_overrides = set()
+        self._suppress_qty_sync = False
+        self._negative_extra_rows = set()
         self.temp_bom_dir = Path(tempfile.gettempdir()) / "kicad_mouser_bom"
         self.temp_bom_dir.mkdir(parents=True, exist_ok=True)
         self._mouser_busy = False
@@ -2436,18 +2439,25 @@ class MouserAutoOrderTab(wx.Panel):
         top.Add(self.btn_open_bom, 1, wx.EXPAND | wx.RIGHT, 6)
         sep = wx.StaticLine(self, style=wx.LI_VERTICAL)
         top.Add(sep, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 6)
-        top.Add(self.btn_submit, 1, wx.EXPAND)
+        top.Add(self.btn_submit, 1, wx.EXPAND | wx.RIGHT, 6)
+        sep2 = wx.StaticLine(self, style=wx.LI_VERTICAL)
+        top.Add(sep2, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 6)
+        lbl_mnr_column = wx.StaticText(self, label="Mouser # column:")
+        lbl_mnr_column.SetToolTip("Select which column in the BOM contains the Mouser Part Numbers.")
+        top.Add(lbl_mnr_column, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        self.choice_mnr = wx.ComboBox(self, choices=[], style=wx.CB_READONLY)
+        top.Add(self.choice_mnr, 0, wx.ALIGN_CENTER_VERTICAL)
         s.Add(top, 0, wx.ALL, 0)
         s.AddSpacer(10)
 
-        # ---------- Configuration row: MNR column selection + multiplier ----------
+        # ---------- Configuration row: group-by + multiplier ----------
         cfg = wx.BoxSizer(wx.HORIZONTAL)
-        lbl_mnr_column = wx.StaticText(self, label="Select Mouser Number Column:")
-        lbl_mnr_column.SetToolTip("Select which column in the BOM contains the Mouser Part Numbers.")
-        cfg.Add(lbl_mnr_column, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 0)
-        
-        self.choice_mnr = wx.ComboBox(self, choices=[], style=wx.CB_READONLY)
-        cfg.Add(self.choice_mnr, 0, wx.RIGHT, 12)
+        lbl_group_by = wx.StaticText(self, label="Group by:")
+        lbl_group_by.SetToolTip("Group BOM lines by the selected column before loading. Choose '(none)' to disable.")
+        cfg.Add(lbl_group_by, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 0)
+        self.choice_group = wx.ComboBox(self, choices=["Value", "(none)"], style=wx.CB_READONLY)
+        self.choice_group.SetSelection(0)
+        cfg.Add(self.choice_group, 0, wx.RIGHT, 12)
 
         lbl_multiplier = wx.StaticText(self, label="Multiplier:")
         lbl_multiplier.SetToolTip("Number of parts to order, e.g. 5: order 5x the BOM quantity for 5 PCBs.")
@@ -2475,10 +2485,19 @@ class MouserAutoOrderTab(wx.Panel):
         self.col_exclude.SetAlignment(wx.ALIGN_CENTER)
         self.col_ref     = self.dv.AppendTextColumn("Reference", width=250)
         self.col_mnr     = self.dv.AppendTextColumn("Mouser Number", width=200)
-        self.col_qty     = self.dv.AppendTextColumn("Qty", width=80)
+        self.col_qty     = self.dv.AppendTextColumn("Per board Qty", width=120)
         self.col_extra   = self.dv.AppendTextColumn(
             "Extra Qty", width=90, mode=dv.DATAVIEW_CELL_EDITABLE
         )
+        self.col_final   = self.dv.AppendTextColumn(
+            "Final Qty", width=90, mode=dv.DATAVIEW_CELL_EDITABLE
+        )
+        self.COL_INCLUDE = 0
+        self.COL_REF = 1
+        self.COL_MNR = 2
+        self.COL_QTY = 3
+        self.COL_EXTRA = 4
+        self.COL_FINAL = 5
         self.dv.SetDropTarget(BOMFileDropTarget(self))
         self.SetDropTarget(BOMFileDropTarget(self))
         s.Add(self.dv, 1, wx.EXPAND | wx.ALL, 0)
@@ -2490,8 +2509,14 @@ class MouserAutoOrderTab(wx.Panel):
         self.btn_open_bom.Bind(wx.EVT_BUTTON, self.on_open_bom)
         self.btn_submit.Bind(wx.EVT_BUTTON, self.on_submit_order)
         self.choice_mnr.Bind(wx.EVT_COMBOBOX, self.on_mnr_changed)
+        self.choice_group.Bind(wx.EVT_COMBOBOX, self.on_group_changed)
         self.Bind(wx.EVT_CHECKBOX, self.on_master_mouser_toggle, self.chk_master_mouser)
-        self.dv.Bind(dv.EVT_DATAVIEW_ITEM_VALUE_CHANGED, self.on_mouser_checkbox_changed)
+        self.dv.Bind(dv.EVT_DATAVIEW_ITEM_VALUE_CHANGED, self.on_dv_value_changed)
+        self.dv.Bind(dv.EVT_DATAVIEW_ITEM_EDITING_DONE, self.on_bom_cell_edited)
+        self.multiplier.Bind(wx.EVT_SPINCTRL, self.on_multiplier_changed)
+        self.multiplier.Bind(wx.EVT_TEXT, self.on_multiplier_changed)
+        self.dv.Bind(wx.EVT_LEFT_DOWN, self.on_dv_left_down)
+        self._pending_edit = None
 
     # ---------- Logging helper ----------
     def log(self, text):
@@ -2512,6 +2537,7 @@ class MouserAutoOrderTab(wx.Panel):
             self.btn_open_bom,
             self.btn_submit,
             self.choice_mnr,
+            self.choice_group,
             self.multiplier,
             self.chk_master_mouser,
             self.dv,
@@ -2559,10 +2585,11 @@ class MouserAutoOrderTab(wx.Panel):
             self._set_mouser_busy(True)
         self._log_ui(f"[INFO] Loading BOM: {bom_path}")
         ctx = mp.get_context("spawn")
+        group_by = self._get_group_by_field()
         self._bom_parse_queue = ctx.Queue()
         self._bom_parse_process = ctx.Process(
             target=_parse_bom_worker,
-            args=(bom_path, self._bom_parse_queue),
+            args=(bom_path, group_by, self._bom_parse_queue),
         )
         self._bom_parse_process.start()
         if not self._bom_parse_timer:
@@ -2712,15 +2739,34 @@ class MouserAutoOrderTab(wx.Panel):
             choices = [h for h in headers if h not in ("Reference", "Qty")]
             if not choices:
                 choices = [self.mouser.CSV_MOUSER_COLUMN_NAME]
+            current_mnr = self.choice_mnr.GetValue()
             self.choice_mnr.Clear()
             self.choice_mnr.AppendItems(choices)
             default_idx = 0
             if self.mouser.CSV_MOUSER_COLUMN_NAME in choices:
                 default_idx = choices.index(self.mouser.CSV_MOUSER_COLUMN_NAME)
-            self.choice_mnr.SetSelection(default_idx)
+            elif "Value" in choices:
+                default_idx = choices.index("Value")
+            if current_mnr in choices:
+                self.choice_mnr.SetStringSelection(current_mnr)
+            else:
+                self.choice_mnr.SetSelection(default_idx)
+
+            group_choices = ["(none)"] + [h for h in headers if h not in ("Reference", "Qty")]
+            current_group = self.choice_group.GetValue()
+            self.choice_group.Clear()
+            self.choice_group.AppendItems(group_choices)
+            if current_group in group_choices:
+                self.choice_group.SetStringSelection(current_group)
+            elif "Value" in group_choices:
+                self.choice_group.SetStringSelection("Value")
+            else:
+                self.choice_group.SetStringSelection("(none)")
+
             self.multiplier.SetValue(5)
 
             self.current_data_array = data
+            self._final_overrides.clear()
 
             self.dv.GetStore().DeleteAllItems()
             mnr_col = self.choice_mnr.GetValue() or choices[0]
@@ -2729,7 +2775,11 @@ class MouserAutoOrderTab(wx.Panel):
             mnrs = data.get(mnr_col, [""] * len(refs))
             qtys = data.get("Qty", [""] * len(refs))
             for ref, mnr, qty in zip(refs, mnrs, qtys):
-                self.dv.GetStore().AppendItem([True, str(ref), str(mnr), str(qty), "0"])
+                final_qty = self._compute_final_qty(qty, "0")
+                self.dv.GetStore().AppendItem([True, str(ref), str(mnr), str(qty), "0", str(final_qty)])
+            for row in range(self.dv.GetStore().GetCount()):
+                self._enforce_final_qty_selection(row)
+                self._update_extra_qty_style(row)
 
             self.log(f"[OK] Loaded {len(refs)} BOM rows.")
             self._update_master_mouser_state()
@@ -2746,14 +2796,31 @@ class MouserAutoOrderTab(wx.Panel):
         
         store = self.dv.GetStore()
         store.DeleteAllItems()
+        self._final_overrides.clear()
 
         refs = self.current_data_array.get("Reference", [])
         mnrs = self.current_data_array.get(mnr_col, [""] * len(refs))
         qtys = self.current_data_array.get("Qty", [""] * len(refs))
 
         for ref, mnr, qty in zip(refs, mnrs, qtys):
-            store.AppendItem([True, str(ref), str(mnr), str(qty), "0"])
+            final_qty = self._compute_final_qty(qty, "0")
+            store.AppendItem([True, str(ref), str(mnr), str(qty), "0", str(final_qty)])
+        for row in range(store.GetCount()):
+            self._enforce_final_qty_selection(row)
+            wx.CallAfter(self._update_extra_qty_style, row)
         self._update_master_mouser_state()
+
+    def _get_group_by_field(self) -> str | None:
+        value = self.choice_group.GetValue().strip() if self.choice_group else ""
+        if not value or value.lower() == "(none)":
+            return None
+        return value
+
+    def on_group_changed(self, evt):
+        """Re-parse BOM using the selected grouping column."""
+        if not self.current_bom_file:
+            return
+        self._start_bom_parse(self.current_bom_file)
 
     def _update_master_mouser_state(self):
         """Sync master checkbox label/value based on current rows."""
@@ -2775,11 +2842,252 @@ class MouserAutoOrderTab(wx.Panel):
         if event:
             event.Skip()
 
-    def on_mouser_checkbox_changed(self, event):
-        """Handle per-row checkbox toggles to keep master state in sync."""
-        self._update_master_mouser_state()
+    def on_dv_value_changed(self, event):
+        """Handle DataView value changes (include toggle + qty edits)."""
+        if self._suppress_qty_sync:
+            if event:
+                event.Skip()
+            return
+        try:
+            col = event.GetColumn()
+        except Exception:
+            col = None
+        try:
+            item = event.GetItem()
+        except Exception:
+            item = None
+        row = self.dv.ItemToRow(item) if item else None
+        if col == self.COL_INCLUDE:
+            if row is not None:
+                store = self.dv.GetStore()
+                try:
+                    include_now = bool(store.GetValueByRow(row, self.COL_INCLUDE))
+                except Exception:
+                    include_now = False
+                if include_now:
+                    base_qty = store.GetValueByRow(row, self.COL_QTY)
+                    try:
+                        base = int(str(base_qty).strip())
+                    except Exception:
+                        base = 0
+                    try:
+                        mult = int(self.multiplier.GetValue() or 1)
+                    except Exception:
+                        mult = 1
+                    final_val = max(0, base * mult)
+                    try:
+                        current_final = int(str(store.GetValueByRow(row, self.COL_FINAL)).strip())
+                    except Exception:
+                        current_final = 0
+                    if current_final <= 0 and final_val > 0:
+                        self._suppress_qty_sync = True
+                        store.SetValueByRow(str(final_val), row, self.COL_FINAL)
+                        store.SetValueByRow("0", row, self.COL_EXTRA)
+                        self._suppress_qty_sync = False
+                        wx.CallAfter(self._update_extra_qty_style, row)
+            self._update_master_mouser_state()
+        elif col == self.COL_FINAL and row is not None:
+            store = self.dv.GetStore()
+            base_qty = store.GetValueByRow(row, self.COL_QTY)
+            final_qty = store.GetValueByRow(row, self.COL_FINAL)
+            try:
+                base = int(str(base_qty).strip())
+            except Exception:
+                base = 0
+            try:
+                final_val = int(str(final_qty).strip())
+            except Exception:
+                final_val = 0
+            if final_val < 0:
+                final_val = 0
+                self._suppress_qty_sync = True
+                store.SetValueByRow(str(final_val), row, self.COL_FINAL)
+                self._suppress_qty_sync = False
+            try:
+                mult = int(self.multiplier.GetValue() or 1)
+            except Exception:
+                mult = 1
+            extra_val = final_val - (base * mult)
+            self._suppress_qty_sync = True
+            store.SetValueByRow(str(extra_val), row, self.COL_EXTRA)
+            self._suppress_qty_sync = False
+            self._enforce_final_qty_selection(row)
+            wx.CallAfter(self._update_extra_qty_style, row)
+        elif col == self.COL_EXTRA and row is not None:
+            store = self.dv.GetStore()
+            base_qty = store.GetValueByRow(row, self.COL_QTY)
+            extra_qty = store.GetValueByRow(row, self.COL_EXTRA)
+            self._suppress_qty_sync = True
+            store.SetValueByRow(str(self._compute_final_qty(base_qty, extra_qty)), row, self.COL_FINAL)
+            self._suppress_qty_sync = False
+            self._enforce_final_qty_selection(row)
+            wx.CallAfter(self._update_extra_qty_style, row)
         if event:
             event.Skip()
+
+    def _compute_final_qty(self, base_qty, extra_qty):
+        try:
+            base = int(str(base_qty).strip())
+        except Exception:
+            base = 0
+        try:
+            extra = int(str(extra_qty).strip())
+        except Exception:
+            extra = 0
+        try:
+            mult = int(self.multiplier.GetValue() or 1)
+        except Exception:
+            mult = 1
+        return max(0, base * mult + extra)
+
+    def _enforce_final_qty_selection(self, row):
+        store = self.dv.GetStore()
+        try:
+            final_val = int(str(store.GetValueByRow(row, self.COL_FINAL)).strip())
+        except Exception:
+            final_val = 0
+        if final_val <= 0:
+            try:
+                currently_checked = bool(store.GetValueByRow(row, self.COL_INCLUDE))
+            except Exception:
+                currently_checked = False
+            store.SetValueByRow(False, row, self.COL_INCLUDE)
+            if currently_checked:
+                self._update_master_mouser_state()
+
+    def _update_extra_qty_style(self, row):
+        store = self.dv.GetStore()
+        try:
+            extra_val = int(str(store.GetValueByRow(row, self.COL_EXTRA)).strip())
+        except Exception:
+            extra_val = 0
+        was_negative = row in self._negative_extra_rows
+        is_negative = extra_val < 0
+        try:
+            attr = dv.DataViewItemAttr()
+            if is_negative:
+                attr.SetColour(wx.Colour(200, 0, 0))
+                attr.SetBackgroundColour(wx.Colour(255, 230, 230))
+            else:
+                attr.SetColour(wx.NullColour)
+                attr.SetBackgroundColour(wx.NullColour)
+            if hasattr(store, "SetAttrByRow"):
+                store.SetAttrByRow(row, self.COL_EXTRA, attr)
+            elif hasattr(store, "SetAttr"):
+                store.SetAttr(row, self.COL_EXTRA, attr)
+            elif hasattr(self.dv, "SetAttr"):
+                self.dv.SetAttr(row, self.COL_EXTRA, attr)
+            try:
+                self.dv.RefreshRow(row)
+            except Exception:
+                self.dv.Refresh()
+        except Exception:
+            return
+        if is_negative and not was_negative:
+            try:
+                ref = store.GetValueByRow(row, self.COL_REF)
+            except Exception:
+                ref = ""
+            self._negative_extra_rows.add(row)
+            self.log(f"[ERROR] Negative Extra Qty for {ref or 'row ' + str(row)}: {extra_val}")
+        elif not is_negative and was_negative:
+            self._negative_extra_rows.discard(row)
+
+    def on_multiplier_changed(self, event):
+        """Recalculate final qty for rows that are not manually overridden."""
+        store = self.dv.GetStore()
+        total = store.GetCount()
+        self._suppress_qty_sync = True
+        for row in range(total):
+            base_qty = store.GetValueByRow(row, self.COL_QTY)
+            extra_qty = store.GetValueByRow(row, self.COL_EXTRA)
+            store.SetValueByRow(str(self._compute_final_qty(base_qty, extra_qty)), row, self.COL_FINAL)
+            self._enforce_final_qty_selection(row)
+        self._suppress_qty_sync = False
+        if event:
+            event.Skip()
+
+    def on_bom_cell_edited(self, event):
+        """Track manual overrides and recompute final qty when extra qty changes."""
+        if self._suppress_qty_sync:
+            if event:
+                event.Skip()
+            return
+        try:
+            item = event.GetItem()
+        except Exception:
+            item = None
+        row = self.dv.ItemToRow(item) if item else None
+        col = event.GetColumn()
+        store = self.dv.GetStore()
+        if row is None:
+            if event:
+                event.Skip()
+            return
+        if col == self.COL_FINAL:
+            base_qty = store.GetValueByRow(row, self.COL_QTY)
+            final_qty = store.GetValueByRow(row, self.COL_FINAL)
+            try:
+                base = int(str(base_qty).strip())
+            except Exception:
+                base = 0
+            try:
+                final_val = int(str(final_qty).strip())
+            except Exception:
+                final_val = 0
+            if final_val < 0:
+                final_val = 0
+                self._suppress_qty_sync = True
+                store.SetValueByRow(str(final_val), row, self.COL_FINAL)
+                self._suppress_qty_sync = False
+            try:
+                mult = int(self.multiplier.GetValue() or 1)
+            except Exception:
+                mult = 1
+            extra_val = final_val - (base * mult)
+            self._suppress_qty_sync = True
+            store.SetValueByRow(str(extra_val), row, self.COL_EXTRA)
+            self._suppress_qty_sync = False
+            self._enforce_final_qty_selection(row)
+            wx.CallAfter(self._update_extra_qty_style, row)
+        elif col == self.COL_EXTRA:
+            base_qty = store.GetValueByRow(row, self.COL_QTY)
+            extra_qty = store.GetValueByRow(row, self.COL_EXTRA)
+            self._suppress_qty_sync = True
+            store.SetValueByRow(str(self._compute_final_qty(base_qty, extra_qty)), row, self.COL_FINAL)
+            self._suppress_qty_sync = False
+            self._enforce_final_qty_selection(row)
+            self._update_extra_qty_style(row)
+        if event:
+            event.Skip()
+
+    def on_dv_left_down(self, event):
+        """Start editing editable qty fields on single click."""
+        pos = event.GetPosition()
+        hit = self.dv.HitTest(pos)
+        item = None
+        col = None
+        if isinstance(hit, tuple):
+            if len(hit) >= 1:
+                item = hit[0]
+            if len(hit) >= 2:
+                col = hit[1]
+        if item and col in (self.COL_EXTRA, self.COL_FINAL):
+            self._pending_edit = (item, col)
+            event.Skip()
+            wx.CallAfter(self._begin_pending_edit)
+            return
+        event.Skip()
+
+    def _begin_pending_edit(self):
+        if not self._pending_edit:
+            return
+        item, col = self._pending_edit
+        self._pending_edit = None
+        try:
+            self.dv.EditItem(item, col)
+        except Exception:
+            pass
 
     # ---------- Data preparation ----------
     def collect_selected_for_order(self):
@@ -2797,15 +3105,24 @@ class MouserAutoOrderTab(wx.Panel):
                 continue
             refs.append(store.GetValueByRow(row, 1))
             mnrs.append(store.GetValueByRow(row, 2))
-            qtys.append(store.GetValueByRow(row, 3))
-            extras.append(store.GetValueByRow(row, 4))
+            base_qty = store.GetValueByRow(row, self.COL_QTY)
+            extra_qty = store.GetValueByRow(row, self.COL_EXTRA)
+            final_qty = store.GetValueByRow(row, self.COL_FINAL)
+            try:
+                final_val = int(str(final_qty).strip())
+            except Exception:
+                final_val = self._compute_final_qty(base_qty, extra_qty)
+            if final_val <= 0:
+                continue
+            qtys.append(str(final_val))
+            extras.append("0")
         return {
             "Reference": refs,
             col_mnr_name: mnrs,
             "MNR_Column_Name": col_mnr_name,
             "Qty": qtys,
             "ExtraQty": extras,
-            "Multiplier": int(self.multiplier.GetValue() or 1),
+            "Multiplier": 1,
         }
 
     def on_submit_order(self, evt):
