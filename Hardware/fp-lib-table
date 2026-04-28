@@ -1,5 +1,4 @@
 (fp_lib_table
-  (version 7)
-  (lib (name "LaborLogo")(type "KiCad")(uri "${KIPRJMOD}/footprints/labor_logo.pretty")(options "")(descr ""))
-  (lib (name "ProjectFootprints")(type "KiCad")(uri "${KIPRJMOD}/footprints/ProjectFootprints.pretty")(options "")(descr ""))
+	(version 7)
+	(lib (name "ProjectFootprints") (type "KiCad") (uri "${KIPRJMOD}/../data/footprints/ProjectFootprints.pretty") (options "") (descr ""))
 )
